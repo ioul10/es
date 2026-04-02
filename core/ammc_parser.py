@@ -201,44 +201,104 @@ def _parse(s) -> float | None:
 # MATCHING
 # ══════════════════════════════════════════════════════════════════
 
-# Règles spéciales pour éviter les faux positifs
-_SPECIAL_RULES = {
-    # label PDF normalisé → index dans le template
-    'total i a b c d e':        ('actif',  25),  # TOTAL I actif
-    'total ii f g h i':         ('actif',  42),  # TOTAL II actif
-    'total iii actif':          ('actif',  47),  # TOTAL III actif
-    'total general':            ('actif',  48),  # TOTAL GÉNÉRAL
-    'total i a b c d e passif': ('passif', 25),  # TOTAL I passif
-    'total ii f g h':           ('passif', 37),  # TOTAL II passif
-    'total iii passif':         ('passif', 42),  # TOTAL III passif
-}
-
-_CONTEXT_RULES = {
-    # Pour "Personnel" et "État" qui existent dans actif ET passif
-    # → on utilise le contexte (section courante)
-    'personnel': {'actif': 35, 'passif': 29},
-    'etat':      {'actif': 36, 'passif': 30},
-    'comptes associes': {'actif': 37, 'passif': 31},
-}
-
-def match_label(label: str, template: list,
-                context: str = '', used: set = None) -> int:
+def match_label(label: str, template: list, used: set = None) -> int:
     """
     Trouve l'index dans le template correspondant au label extrait.
-    - context : 'actif_immob' | 'actif_circ' | 'actif_tres' | 'passif_fp' | 'passif_circ' | etc.
-    - used : ensemble des indices déjà utilisés (évite les doublons)
+    used : indices déjà utilisés (évite les doublons).
     Retourne l'index ou -1.
     """
     if used is None: used = set()
     n = _norm(label)
     if not n or len(n) < 2: return -1
 
-    # 1. Règles spéciales exactes
-    for key, (ctx, idx) in _SPECIAL_RULES.items():
-        if key in n:
-            return idx if idx not in used else -1
+    # ── Règles exactes prioritaires ──────────────────────────────
+    # Totaux actif : discriminés par les lettres A+B+C...
+    if 'a b c d e' in n and 'total' in n:
+        for i,(k,_,_) in enumerate(template):
+            if 'total i actif' == k and i not in used: return i
+    if ('f g h i' in n or 'f g h' in n) and 'total' in n and 'ii' in n:
+        for i,(k,_,_) in enumerate(template):
+            if 'total ii actif' == k and i not in used: return i
+    if 'total' in n and 'iii' in n and 'general' not in n:
+        for i,(k,_,_) in enumerate(template):
+            if 'total iii actif' == k and i not in used: return i
+            if 'total iii passif' == k and i not in used: return i
+    if 'total' in n and 'general' in n:
+        for i,(k,_,_) in enumerate(template):
+            if 'total general' in k and i not in used: return i
 
-    # 2. Matching par mots communs
+    # Totaux passif
+    if 'a b c d e' in n and 'total' in n:
+        for i,(k,_,_) in enumerate(template):
+            if 'total i passif' == k and i not in used: return i
+    if ('f g h' in n) and 'total' in n and 'ii' in n:
+        for i,(k,_,_) in enumerate(template):
+            if 'total ii passif' == k and i not in used: return i
+
+    # Totaux CPC : séquentiels par numéro romain
+    # Totaux CPC : du plus spécifique au plus général (éviter 'total v' ⊂ 'total viii')
+    _cpc_total_map = [
+        ('total viii', 'total viii'),
+        ('total ix',   'total ix'),
+        ('total iv',   'total iv'),
+        ('total ii',   'total ii cpc'),
+        ('total v',    'total v'),
+        ('total i',    'total i cpc'),
+    ]
+    for pat, key in _cpc_total_map:
+        norm_pat = _norm(pat)
+        if n == norm_pat or n.startswith(norm_pat + ' ') or ('.' in label and norm_pat in n):
+            for i,(k,_,_) in enumerate(template):
+                if k == key and i not in used: return i
+
+    # Écarts de conversion : distinguer immobilisé [E] vs circulant [I]
+    if 'ecart' in n and 'conversion' in n and 'actif' in n:
+        if 'element' in n or '(i)' in _norm(label) or 'circulant' in n:
+            for i,(k,_,_) in enumerate(template):
+                if k == 'ecarts conversion actif circulant' and i not in used: return i
+        else:
+            for i,(k,_,_) in enumerate(template):
+                if k == 'ecarts conversion actif immobilise' and i not in used: return i
+
+    if 'ecart' in n and 'conversion' in n and 'passif' in n:
+        if 'element' in n or 'circulant' in n:
+            for i,(k,_,_) in enumerate(template):
+                if k == 'ecarts conversion passif circulant' and i not in used: return i
+        else:
+            for i,(k,_,_) in enumerate(template):
+                if k == 'ecarts conversion passif financement' and i not in used: return i
+
+    # Résultats : match exact sur la clé pour éviter les doublons de page
+    _result_exact = {
+        'resultat exploitation':   'resultat exploitation',
+        'resultat financier':      'resultat financier',
+        'resultat courant':        'resultat courant',
+        'resultat non courant':    'resultat non courant',
+        'resultat avant impots':   'resultat avant impots',
+        'resultat net xi xii':     'resultat net',
+        'resultat net xi':         'resultat net',
+    }
+    for pat, key in _result_exact.items():
+        if n.startswith(pat) or n == pat:
+            for i,(k,_,_) in enumerate(template):
+                if k == key and i not in used: return i
+            return -1  # si déjà used, on ne fallback pas sur un autre résultat
+
+    # Numéros romains seuls (XI → RÉSULTAT AVANT IMPÔTS, XII → IMPÔTS, XIII → RN)
+    _romain_to_key = {
+        'xi':    'resultat avant impots',
+        'xii':   'impots resultats',
+        'xiii':  'resultat net',
+        'xiv':   'total produits',
+        'xv':    'total charges',
+        'xvi':   'resultat net total',
+    }
+    if n.strip() in _romain_to_key:
+        target = _romain_to_key[n.strip()]
+        for i,(k,_,_) in enumerate(template):
+            if k == target and i not in used: return i
+
+    # ── Matching par similarité de mots ──────────────────────────
     words_label = set(w for w in n.split() if len(w) > 2)
     if not words_label: return -1
 
@@ -253,9 +313,9 @@ def match_label(label: str, template: list,
         union  = len(words_label | words_key)
         score  = common / union if union > 0 else 0
 
-        # Bonus : label commence par la clé (ou vice-versa)
+        # Bonus début commun
         if n.startswith(n_key[:8]) or n_key.startswith(n[:8]):
-            score = min(score + 0.25, 1.0)
+            score = min(score + 0.2, 1.0)
 
         if score >= 0.35:
             scores.append((score, i))
