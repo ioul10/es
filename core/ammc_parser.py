@@ -204,101 +204,145 @@ def _parse(s) -> float | None:
 def match_label(label: str, template: list, used: set = None) -> int:
     """
     Trouve l'index dans le template correspondant au label extrait.
-    used : indices déjà utilisés (évite les doublons).
-    Retourne l'index ou -1.
+    used : indices déjà utilisés. Si un groupe exclusif est already used → -1 (jamais de fallback).
     """
     if used is None: used = set()
     n = _norm(label)
     if not n or len(n) < 2: return -1
 
-    # ── Règles exactes prioritaires ──────────────────────────────
-    # Totaux actif : discriminés par les lettres A+B+C...
-    if 'a b c d e' in n and 'total' in n:
-        for i,(k,_,_) in enumerate(template):
-            if 'total i actif' == k and i not in used: return i
-    if ('f g h i' in n or 'f g h' in n) and 'total' in n and 'ii' in n:
-        for i,(k,_,_) in enumerate(template):
-            if 'total ii actif' == k and i not in used: return i
-    if 'total' in n and 'iii' in n and 'general' not in n:
-        for i,(k,_,_) in enumerate(template):
-            if 'total iii actif' == k and i not in used: return i
-            if 'total iii passif' == k and i not in used: return i
-    if 'total' in n and 'general' in n:
-        for i,(k,_,_) in enumerate(template):
-            if 'total general' in k and i not in used: return i
+    def _first_free(key):
+        """
+        Retourne l'idx si la clé existe et n'est pas used.
+        Retourne -1 si la clé existe mais est already used.
+        Retourne None si la clé n'existe pas dans ce template.
+        """
+        for i, (k, _, _) in enumerate(template):
+            if k == key:
+                return i if i not in used else -1
+        return None  # clé absente de ce template → règle non applicable
 
-    # Totaux passif
-    if 'a b c d e' in n and 'total' in n:
-        for i,(k,_,_) in enumerate(template):
-            if 'total i passif' == k and i not in used: return i
-    if ('f g h' in n) and 'total' in n and 'ii' in n:
-        for i,(k,_,_) in enumerate(template):
-            if 'total ii passif' == k and i not in used: return i
+    def _exclusive(key):
+        """
+        Règle exclusive : si la clé existe → retourner son idx ou -1 (jamais fallback).
+        Si la clé n'existe pas → retourner None (laisser les règles suivantes s'appliquer).
+        """
+        r = _first_free(key)
+        return r  # None = pas applicable, -1 = blocked, idx = found
 
-    # Totaux CPC : séquentiels par numéro romain
-    # Totaux CPC : du plus spécifique au plus général (éviter 'total v' ⊂ 'total viii')
-    _cpc_total_map = [
-        ('total viii', 'total viii'),
-        ('total ix',   'total ix'),
-        ('total iv',   'total iv'),
-        ('total ii',   'total ii cpc'),
-        ('total v',    'total v'),
-        ('total i',    'total i cpc'),
-    ]
-    for pat, key in _cpc_total_map:
-        norm_pat = _norm(pat)
-        if n == norm_pat or n.startswith(norm_pat + ' ') or ('.' in label and norm_pat in n):
-            for i,(k,_,_) in enumerate(template):
-                if k == key and i not in used: return i
+    # ══════════════════════════════════════════════════════════════
+    # RÈGLES EXCLUSIVES : chaque pattern → UN SEUL idx possible
+    # Si cet idx est already used → -1 (jamais de fallback dans le groupe)
+    # ══════════════════════════════════════════════════════════════
 
-    # Écarts de conversion : distinguer immobilisé [E] vs circulant [I]
+    # ── Totaux : détection par les lettres discriminantes ────────
+    if 'total' in n:
+        # Discriminants par les parenthèses (A+B+C+D+E, F+G+H+I, etc.)
+        _total_rules = [
+            # (pattern dans n,          clés candidates dans l'ordre de priorité)
+            ('general',                  ['total general actif', 'total general passif']),
+            ('i ii iii',                 ['total general actif', 'total general passif']),
+            ('iii',                      ['total iii actif', 'total iii passif']),
+            ('f g h i',                  ['total ii actif']),
+            ('f g h',                    ['total ii passif']),
+            ('a b c d e',                ['total i actif', 'total i passif']),
+            ('total des produits',       ['total produits']),
+            ('total des charges',        ['total charges']),
+            ('total viii',               ['total viii']),
+            ('total ix',                 ['total ix']),
+            ('total iv',                 ['total iv']),
+            ('total ii',                 ['total ii cpc', 'total ii actif', 'total ii passif']),
+            ('total v',                  ['total v']),
+            ('total i',                  ['total i cpc', 'total i actif', 'total i passif']),
+        ]
+        for pat, keys in _total_rules:
+            if pat in n:
+                for key in keys:
+                    r = _first_free(key)
+                    if r is not None:   # clé existe dans ce template
+                        return r        # retourne idx ou -1 (bloqué)
+                # Aucune clé n'existe → continuer
+                break
+
+    # ── Écarts de conversion Actif ───────────────────────────────
     if 'ecart' in n and 'conversion' in n and 'actif' in n:
-        if 'element' in n or '(i)' in _norm(label) or 'circulant' in n:
-            for i,(k,_,_) in enumerate(template):
-                if k == 'ecarts conversion actif circulant' and i not in used: return i
+        if 'circulant' in n or 'element' in n or '(i)' in _norm(label):
+            return _first_free('ecarts conversion actif circulant')
         else:
-            for i,(k,_,_) in enumerate(template):
-                if k == 'ecarts conversion actif immobilise' and i not in used: return i
+            return _first_free('ecarts conversion actif immobilise')
 
+    # ── Écarts de conversion Passif ──────────────────────────────
     if 'ecart' in n and 'conversion' in n and 'passif' in n:
-        if 'element' in n or 'circulant' in n:
-            for i,(k,_,_) in enumerate(template):
-                if k == 'ecarts conversion passif circulant' and i not in used: return i
+        if 'circulant' in n or 'element' in n:
+            return _first_free('ecarts conversion passif circulant')
         else:
-            for i,(k,_,_) in enumerate(template):
-                if k == 'ecarts conversion passif financement' and i not in used: return i
+            return _first_free('ecarts conversion passif financement')
 
-    # Résultats : match exact sur la clé pour éviter les doublons de page
-    _result_exact = {
-        'resultat exploitation':   'resultat exploitation',
-        'resultat financier':      'resultat financier',
-        'resultat courant':        'resultat courant',
-        'resultat non courant':    'resultat non courant',
-        'resultat avant impots':   'resultat avant impots',
-        'resultat net xi xii':     'resultat net',
-        'resultat net xi':         'resultat net',
+    # ── Reprises (groupe exclusif) ───────────────────────────────
+    if 'reprise' in n:
+        if 'non courant' in n:
+            return _first_free('reprises non courantes')
+        if 'financier' in n:
+            return _first_free('reprises financieres')
+        if 'exploitation' in n:
+            return _first_free('reprises exploitation')
+
+    # ── Dotations (groupe exclusif) ──────────────────────────────
+    if 'dotation' in n:
+        if 'non courant' in n:
+            return _first_free('dotations non courantes')
+        if 'financier' in n:
+            return _first_free('dotations financieres')
+        if 'exploitation' in n:
+            return _first_free('dotations exploitation')
+
+    # ── Autres charges (groupe exclusif) ─────────────────────────
+    if 'autres' in n and 'charge' in n:
+        if 'non courant' in n:
+            return _first_free('autres charges non courantes')
+        if 'financier' in n:
+            return _first_free('autres charges financieres')
+        if 'exploitation' in n:
+            return _first_free('autres charges exploitation')
+        if 'externe' in n:
+            return _first_free('autres charges externes')
+
+    # ── Autres produits (groupe exclusif) ────────────────────────
+    if 'autre' in n and 'produit' in n:
+        if 'non courant' in n:
+            return _first_free('autres produits non courants')
+        if 'exploitation' in n:
+            return _first_free('autres produits exploitation')
+
+    # ── Résultats (groupe exclusif) ──────────────────────────────
+    if 'resultat' in n:
+        _results = [
+            ('resultat net xi',          'resultat net'),
+            ('resultat net total',       'resultat net total'),
+            ('resultat avant impot',     'resultat avant impots'),
+            ('resultat non courant',     'resultat non courant'),
+            ('resultat courant',         'resultat courant'),
+            ('resultat financier',       'resultat financier'),
+            ('resultat exploitation',    'resultat exploitation'),
+        ]
+        for pat, key in _results:
+            if n.startswith(pat) or pat in n:
+                return _first_free(key)
+
+    # ── Numéros romains seuls (XI XII XIII...) ───────────────────
+    _romain_seul = {
+        'xi':   'resultat avant impots',
+        'xii':  'impots resultats',
+        'xiii': 'resultat net',
+        'xiv':  'total produits',
+        'xv':   'total charges',
+        'xvi':  'resultat net total',
     }
-    for pat, key in _result_exact.items():
-        if n.startswith(pat) or n == pat:
-            for i,(k,_,_) in enumerate(template):
-                if k == key and i not in used: return i
-            return -1  # si déjà used, on ne fallback pas sur un autre résultat
+    if n.strip() in _romain_seul:
+        return _first_free(_romain_seul[n.strip()])
 
-    # Numéros romains seuls (XI → RÉSULTAT AVANT IMPÔTS, XII → IMPÔTS, XIII → RN)
-    _romain_to_key = {
-        'xi':    'resultat avant impots',
-        'xii':   'impots resultats',
-        'xiii':  'resultat net',
-        'xiv':   'total produits',
-        'xv':    'total charges',
-        'xvi':   'resultat net total',
-    }
-    if n.strip() in _romain_to_key:
-        target = _romain_to_key[n.strip()]
-        for i,(k,_,_) in enumerate(template):
-            if k == target and i not in used: return i
-
-    # ── Matching par similarité de mots ──────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    # MATCHING GÉNÉRAL par similarité de mots (pour tout le reste)
+    # ══════════════════════════════════════════════════════════════
     words_label = set(w for w in n.split() if len(w) > 2)
     if not words_label: return -1
 
@@ -313,7 +357,6 @@ def match_label(label: str, template: list, used: set = None) -> int:
         union  = len(words_label | words_key)
         score  = common / union if union > 0 else 0
 
-        # Bonus début commun
         if n.startswith(n_key[:8]) or n_key.startswith(n[:8]):
             score = min(score + 0.2, 1.0)
 
