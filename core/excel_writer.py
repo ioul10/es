@@ -186,11 +186,12 @@ def _write_passif(wb, info: dict, template: list, value_map: dict):
 
 # Numéros romains pour chaque ligne CPC (selon la loi MCN)
 _CPC_NUMS = [
-    '', '', '', '', '', '', '', '', '', 'I',    # 0-9
-    '', '', '', '', '', '', '', '', 'II', 'III', # 10-19
-    '', '', '', '', '', 'IV', '', '', '', '', '', 'V', 'VI', 'VII', # 20-33
-    '', '', '', '', '', 'VIII', '', '', '', '', 'IX', 'X', 'XI', 'XII', # 34-47
-    'XIII', 'XIV', 'XV', 'XVI', '', '', '', # 48-53
+    '',    '',    '',    '',    '',    '',    '',    '',    '',    'I',    # 0-9   Total I
+    '',    '',    '',    '',    '',    '',    '',    '',    'II',  'III',  # 10-19 Total II / Rés.Exploit
+    '',    '',    '',    '',    '',    'IV',  '',    '',    '',    '',     # 20-29 Total IV
+    '',    'V',   'VI',  'VII', '',    '',    '',    '',    '',    '',     # 30-39 Total V / VI / VII
+    'VIII','',    '',    '',    '',    '',    'IX',  'X',   'XI',  'XII',  # 40-49 Total VIII/IX / X/XI/XII
+    'XIII','XIV', 'XV',  'XVI',                                           # 50-53 XIII/XIV/XV/XVI
 ]
 
 def _write_cpc(wb, info: dict, template: list, value_map: dict):
