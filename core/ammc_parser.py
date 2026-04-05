@@ -7,6 +7,7 @@ import re, unicodedata
 from collections import defaultdict
 import pdfplumber
 from utils.logger import get_logger
+from core.synonyms import lookup_in_template
 
 logger = get_logger(__name__)
 
@@ -180,7 +181,16 @@ CPC = [
 def _norm(s: str) -> str:
     s = unicodedata.normalize('NFD', str(s))
     s = s.encode('ascii', 'ignore').decode().lower()
+    # Nettoyer les préfixes courants : *, I., II., III., IV., V., VI., VII., VIII., IX., X., XI., XII., XIII., XIV., XV., XVI.
+    s = re.sub(r'^\s*[\*\.]+\s*', '', s)
+    s = re.sub(r'^(xvi|xiv|xiii|xii|xi|ix|viii|vii|vi|iv|v|iii|ii|i)\s*[\.\-\=]?\s*', '', s, flags=re.I)
     s = re.sub(r'[^\w\s]', ' ', s)
+    # Normaliser les variantes orthographiques communes
+    s = re.sub(r'chiffres?', 'chiffre', s)
+    s = re.sub(r'reserves?', 'reserve', s)
+    s = re.sub(r'reprises?', 'reprise', s)
+    s = re.sub(r'provisions?', 'provision', s)
+    s = re.sub(r'subventions?', 'subvention', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 def _parse(s) -> float | None:
@@ -208,7 +218,34 @@ def match_label(label: str, template: list, used: set = None) -> int:
     """
     if used is None: used = set()
     n = _norm(label)
+
+    # ── Numéros romains seuls : vérifier AVANT le check len(n) ──
+    # car _norm() supprime les chiffres romains → 'XI' devient ''
+    _romain_seul = {
+        'xi':   'resultat avant impots',
+        'xii':  'impots resultats',
+        'xiii': 'resultat net',
+        'xiv':  'total produits',
+        'xv':   'total charges',
+        'xvi':  'resultat net total',
+    }
+    _label_brut = re.sub(r'[^a-zA-Z]', '', str(label).lower().strip())
+    if _label_brut in _romain_seul:
+        # Définition locale de _first_free avant son usage ici
+        def _ff_early(key):
+            for i, (k, _, _) in enumerate(template):
+                if k == key:
+                    return i if i not in used else -1
+            return None
+        r = _ff_early(_romain_seul[_label_brut])
+        if r is not None: return r
+
     if not n or len(n) < 2: return -1
+
+    # ── 1. Dictionnaire des synonymes (priorité maximale) ────────
+    syn_idx = lookup_in_template(label, template)
+    if syn_idx >= 0 and syn_idx not in used:
+        return syn_idx
 
     def _first_free(key):
         """
@@ -238,20 +275,26 @@ def match_label(label: str, template: list, used: set = None) -> int:
     if 'total' in n:
         # Discriminants par les parenthèses (A+B+C+D+E, F+G+H+I, etc.)
         _total_rules = [
-            # (pattern dans n,          clés candidates dans l'ordre de priorité)
+            # Discriminants forts (lettres dans parenthèses)
             ('general',                  ['total general actif', 'total general passif']),
             ('i ii iii',                 ['total general actif', 'total general passif']),
+            # "TOTAL l+II+III" ou "TOTAL I+II+III" = Total Général
+            ('l ii iii',                 ['total general actif', 'total general passif']),
             ('iii',                      ['total iii actif', 'total iii passif']),
             ('f g h i',                  ['total ii actif']),
             ('f g h',                    ['total ii passif']),
             ('a b c d e',                ['total i actif', 'total i passif']),
+            # Totaux CPC nommés
             ('total des produits',       ['total produits']),
             ('total des charges',        ['total charges']),
+            # Totaux numériques (sans discriminant lettre) — du plus spécifique au plus court
             ('total viii',               ['total viii']),
             ('total ix',                 ['total ix']),
             ('total iv',                 ['total iv']),
+            # "TOTAL II" sans lettres → CPC d'abord, puis actif, puis passif
             ('total ii',                 ['total ii cpc', 'total ii actif', 'total ii passif']),
             ('total v',                  ['total v']),
+            # "TOTAL I" sans lettres → CPC d'abord, puis actif, puis passif
             ('total i',                  ['total i cpc', 'total i actif', 'total i passif']),
         ]
         for pat, keys in _total_rules:
@@ -264,11 +307,16 @@ def match_label(label: str, template: list, used: set = None) -> int:
                 break
 
     # ── Écarts de conversion Actif ───────────────────────────────
-    if 'ecart' in n and 'conversion' in n and 'actif' in n:
-        if 'circulant' in n or 'element' in n or '(i)' in _norm(label):
+    if 'ecart' in n and 'conversion' in n:
+        if 'passif' not in n:  # éviter de traiter les écarts passif ici
+            if 'circulant' in n or 'element' in n:
+                r = _first_free('ecarts conversion actif circulant')
+                if r is not None: return r
+            # "[E]", "(E)", ou sans discriminant → immobilisé en premier
+            r = _first_free('ecarts conversion actif immobilise')
+            if r is not None: return r
+            # Si immobilisé déjà pris → circulant
             return _first_free('ecarts conversion actif circulant')
-        else:
-            return _first_free('ecarts conversion actif immobilise')
 
     # ── Écarts de conversion Passif ──────────────────────────────
     if 'ecart' in n and 'conversion' in n and 'passif' in n:
@@ -328,17 +376,7 @@ def match_label(label: str, template: list, used: set = None) -> int:
             if n.startswith(pat) or pat in n:
                 return _first_free(key)
 
-    # ── Numéros romains seuls (XI XII XIII...) ───────────────────
-    _romain_seul = {
-        'xi':   'resultat avant impots',
-        'xii':  'impots resultats',
-        'xiii': 'resultat net',
-        'xiv':  'total produits',
-        'xv':   'total charges',
-        'xvi':  'resultat net total',
-    }
-    if n.strip() in _romain_seul:
-        return _first_free(_romain_seul[n.strip()])
+    # (règle numéros romains déplacée en tête de fonction)
 
     # ══════════════════════════════════════════════════════════════
     # MATCHING GÉNÉRAL par similarité de mots (pour tout le reste)
@@ -461,7 +499,7 @@ def _xy_rows(page) -> list:
 
     return [(l, v) for l, v in result if v]
 
-def _extract_section(pdf, page_indices: list) -> list[tuple[str, list]]:
+def _extract_section(pdf, page_indices: list, is_actif: bool = False) -> list[tuple[str, list]]:
     """
     Extrait les paires (label, [valeurs]) d'une section.
     Choisit automatiquement X/Y ou extract_tables().
@@ -473,7 +511,7 @@ def _extract_section(pdf, page_indices: list) -> list[tuple[str, list]]:
         tables = page.extract_tables()
         good = [t for t in tables
                 if t and len(t) >= 3 and t[0] and len(t[0]) >= 2
-                and sum(1 for r in t[2:] if any(c for c in r if c)) >= 3]
+                and sum(1 for r in t[1:] if any(c for c in r if c)) >= 2]
         if not good: continue
 
         if any(_has_fused(t) for t in good):
@@ -498,8 +536,18 @@ def _extract_section(pdf, page_indices: list) -> list[tuple[str, list]]:
                     def gv(col):
                         if col and len(row) >= col: return _parse(row[col-1])
                         return None
-                    n = len(val_cols)
-                    vals = [gv(val_cols[i]) for i in range(min(n, 4))]
+                    nv = len(val_cols)
+                    # Pour l'actif : tenir compte des colonnes absentes (ex: Amort vide)
+                    if is_actif and nv == 3:
+                        gap = val_cols[1] - val_cols[0]
+                        if gap > 1:
+                            # Amort absent (saut entre Brut et Net)
+                            vals = [gv(val_cols[0]), None, gv(val_cols[1]), gv(val_cols[2])]
+                        else:
+                            # NetN1 absent (colonnes consécutives)
+                            vals = [gv(val_cols[0]), gv(val_cols[1]), gv(val_cols[2]), None]
+                    else:
+                        vals = [gv(val_cols[i]) for i in range(min(nv, 4))]
                     if vals or label:
                         rows.append((label, vals))
 
@@ -572,7 +620,7 @@ def parse(pdf_path: str) -> dict:
 
     logger.info(f"AMMC parser : {info.get('raison_sociale','?')} | {info.get('exercice','?')}")
 
-    actif_rows  = _extract_section(pdf, [1])       # page 2
+    actif_rows  = _extract_section(pdf, [1], is_actif=True)       # page 2
     passif_rows = _extract_section(pdf, [2])       # page 3
     cpc_rows    = _extract_section(pdf, [3, 4])    # pages 4-5
     pdf.close()
