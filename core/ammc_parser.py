@@ -181,16 +181,14 @@ CPC = [
 def _norm(s: str) -> str:
     s = unicodedata.normalize('NFD', str(s))
     s = s.encode('ascii', 'ignore').decode().lower()
-    # Nettoyer les préfixes courants : *, I., II., III., IV., V., VI., VII., VIII., IX., X., XI., XII., XIII., XIV., XV., XVI.
     s = re.sub(r'^\s*[\*\.]+\s*', '', s)
     s = re.sub(r'^(xvi|xiv|xiii|xii|xi|ix|viii|vii|vi|iv|v|iii|ii|i)\s*[\.\-\=]?\s*', '', s, flags=re.I)
     s = re.sub(r'[^\w\s]', ' ', s)
-    # Normaliser les variantes orthographiques communes
-    s = re.sub(r'chiffres?', 'chiffre', s)
-    s = re.sub(r'reserves?', 'reserve', s)
-    s = re.sub(r'reprises?', 'reprise', s)
-    s = re.sub(r'provisions?', 'provision', s)
-    s = re.sub(r'subventions?', 'subvention', s)
+    s = re.sub(r'chiffres?', 'chiffre', s)
+    s = re.sub(r'reserves?', 'reserve', s)
+    s = re.sub(r'reprises?', 'reprise', s)
+    s = re.sub(r'provisions?', 'provision', s)
+    s = re.sub(r'subventions?', 'subvention', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 def _parse(s) -> float | None:
@@ -212,15 +210,9 @@ def _parse(s) -> float | None:
 # ══════════════════════════════════════════════════════════════════
 
 def match_label(label: str, template: list, used: set = None) -> int:
-    """
-    Trouve l'index dans le template correspondant au label extrait.
-    used : indices déjà utilisés. Si un groupe exclusif est already used → -1 (jamais de fallback).
-    """
     if used is None: used = set()
     n = _norm(label)
 
-    # ── Numéros romains seuls : vérifier AVANT le check len(n) ──
-    # car _norm() supprime les chiffres romains → 'XI' devient ''
     _romain_seul = {
         'xi':   'resultat avant impots',
         'xii':  'impots resultats',
@@ -231,7 +223,6 @@ def match_label(label: str, template: list, used: set = None) -> int:
     }
     _label_brut = re.sub(r'[^a-zA-Z]', '', str(label).lower().strip())
     if _label_brut in _romain_seul:
-        # Définition locale de _first_free avant son usage ici
         def _ff_early(key):
             for i, (k, _, _) in enumerate(template):
                 if k == key:
@@ -242,90 +233,57 @@ def match_label(label: str, template: list, used: set = None) -> int:
 
     if not n or len(n) < 2: return -1
 
-    # ── 1. Dictionnaire des synonymes (priorité maximale) ────────
     syn_idx = lookup_in_template(label, template)
     if syn_idx >= 0 and syn_idx not in used:
         return syn_idx
 
     def _first_free(key):
-        """
-        Retourne l'idx si la clé existe et n'est pas used.
-        Retourne -1 si la clé existe mais est already used.
-        Retourne None si la clé n'existe pas dans ce template.
-        """
         for i, (k, _, _) in enumerate(template):
             if k == key:
                 return i if i not in used else -1
-        return None  # clé absente de ce template → règle non applicable
+        return None
 
-    def _exclusive(key):
-        """
-        Règle exclusive : si la clé existe → retourner son idx ou -1 (jamais fallback).
-        Si la clé n'existe pas → retourner None (laisser les règles suivantes s'appliquer).
-        """
-        r = _first_free(key)
-        return r  # None = pas applicable, -1 = blocked, idx = found
-
-    # ══════════════════════════════════════════════════════════════
-    # RÈGLES EXCLUSIVES : chaque pattern → UN SEUL idx possible
-    # Si cet idx est already used → -1 (jamais de fallback dans le groupe)
-    # ══════════════════════════════════════════════════════════════
-
-    # ── Totaux : détection par les lettres discriminantes ────────
     if 'total' in n:
-        # Discriminants par les parenthèses (A+B+C+D+E, F+G+H+I, etc.)
         _total_rules = [
-            # Discriminants forts (lettres dans parenthèses)
             ('general',                  ['total general actif', 'total general passif']),
             ('i ii iii',                 ['total general actif', 'total general passif']),
-            # "TOTAL l+II+III" ou "TOTAL I+II+III" = Total Général
             ('l ii iii',                 ['total general actif', 'total general passif']),
             ('iii',                      ['total iii actif', 'total iii passif']),
             ('f g h i',                  ['total ii actif']),
             ('f g h',                    ['total ii passif']),
             ('a b c d e',                ['total i actif', 'total i passif']),
-            # Totaux CPC nommés
             ('total des produits',       ['total produits']),
             ('total des charges',        ['total charges']),
-            # Totaux numériques (sans discriminant lettre) — du plus spécifique au plus court
             ('total viii',               ['total viii']),
             ('total ix',                 ['total ix']),
             ('total iv',                 ['total iv']),
-            # "TOTAL II" sans lettres → CPC d'abord, puis actif, puis passif
             ('total ii',                 ['total ii cpc', 'total ii actif', 'total ii passif']),
             ('total v',                  ['total v']),
-            # "TOTAL I" sans lettres → CPC d'abord, puis actif, puis passif
             ('total i',                  ['total i cpc', 'total i actif', 'total i passif']),
         ]
         for pat, keys in _total_rules:
             if pat in n:
                 for key in keys:
                     r = _first_free(key)
-                    if r is not None:   # clé existe dans ce template
-                        return r        # retourne idx ou -1 (bloqué)
-                # Aucune clé n'existe → continuer
+                    if r is not None:
+                        return r
                 break
 
-    # ── Écarts de conversion Actif ───────────────────────────────
     if 'ecart' in n and 'conversion' in n:
-        if 'passif' not in n:  # éviter de traiter les écarts passif ici
+        if 'passif' not in n:
             if 'circulant' in n or 'element' in n:
                 r = _first_free('ecarts conversion actif circulant')
                 if r is not None: return r
-            # "[E]", "(E)", ou sans discriminant → immobilisé en premier
             r = _first_free('ecarts conversion actif immobilise')
             if r is not None: return r
-            # Si immobilisé déjà pris → circulant
             return _first_free('ecarts conversion actif circulant')
 
-    # ── Écarts de conversion Passif ──────────────────────────────
     if 'ecart' in n and 'conversion' in n and 'passif' in n:
         if 'circulant' in n or 'element' in n:
             return _first_free('ecarts conversion passif circulant')
         else:
             return _first_free('ecarts conversion passif financement')
 
-    # ── Reprises (groupe exclusif) ───────────────────────────────
     if 'reprise' in n:
         if 'non courant' in n:
             return _first_free('reprises non courantes')
@@ -334,7 +292,6 @@ def match_label(label: str, template: list, used: set = None) -> int:
         if 'exploitation' in n:
             return _first_free('reprises exploitation')
 
-    # ── Dotations (groupe exclusif) ──────────────────────────────
     if 'dotation' in n:
         if 'non courant' in n:
             return _first_free('dotations non courantes')
@@ -343,7 +300,6 @@ def match_label(label: str, template: list, used: set = None) -> int:
         if 'exploitation' in n:
             return _first_free('dotations exploitation')
 
-    # ── Autres charges (groupe exclusif) ─────────────────────────
     if 'autres' in n and 'charge' in n:
         if 'non courant' in n:
             return _first_free('autres charges non courantes')
@@ -354,14 +310,12 @@ def match_label(label: str, template: list, used: set = None) -> int:
         if 'externe' in n:
             return _first_free('autres charges externes')
 
-    # ── Autres produits (groupe exclusif) ────────────────────────
     if 'autre' in n and 'produit' in n:
         if 'non courant' in n:
             return _first_free('autres produits non courants')
         if 'exploitation' in n:
             return _first_free('autres produits exploitation')
 
-    # ── Résultats (groupe exclusif) ──────────────────────────────
     if 'resultat' in n:
         _results = [
             ('resultat net xi',          'resultat net'),
@@ -376,11 +330,6 @@ def match_label(label: str, template: list, used: set = None) -> int:
             if n.startswith(pat) or pat in n:
                 return _first_free(key)
 
-    # (règle numéros romains déplacée en tête de fonction)
-
-    # ══════════════════════════════════════════════════════════════
-    # MATCHING GÉNÉRAL par similarité de mots (pour tout le reste)
-    # ══════════════════════════════════════════════════════════════
     words_label = set(w for w in n.split() if len(w) > 2)
     if not words_label: return -1
 
@@ -432,15 +381,31 @@ def _has_fused(table) -> bool:
     return count >= 3
 
 def _detect_val_cols(table) -> list:
+    """
+    Détecte les colonnes contenant des valeurs numériques.
+
+    FIX : les 4 dernières lignes du CPC (XIV TOTAL DES PRODUITS,
+    XV TOTAL DES CHARGES, XVI RÉSULTAT NET) sont dans un tableau
+    séparé de seulement 3 lignes sur la page 5. L'ancienne version
+    faisait [2:] sur ce tableau → 1 seule ligne analysée → aucune
+    colonne n'atteignait le seuil de 2 → val_cols = [] → lignes ignorées.
+
+    Correction : adapter le skip et le seuil minimum à la taille du tableau.
+    - Tableaux >= 5 lignes : skip 2 lignes de header, seuil 2 occurrences
+    - Petits tableaux < 5 lignes : skip 0, seuil 1 occurrence
+    """
     hits = {}
-    for row in (table or [])[2:]:
+    tbl = table or []
+    skip     = 2 if len(tbl) >= 5 else 0
+    min_hits = 2 if len(tbl) >= 5 else 1
+    for row in tbl[skip:]:
         if not row: continue
         for ci, c in enumerate(row):
             if not c: continue
             s = str(c).strip().replace('\xa0','').replace(' ','')
             if re.match(r'^-?\d{1,3}(\.\d{3})*,\d{2}$', s) or re.match(r'^-?\d+,\d{2}$', s):
                 hits[ci+1] = hits.get(ci+1, 0) + 1
-    return sorted(k for k, v in hits.items() if v >= 2)
+    return sorted(k for k, v in hits.items() if v >= min_hits)
 
 def _xy_rows(page) -> list:
     """Extraction X/Y pour pages avec cellules fusionnées."""
@@ -523,7 +488,6 @@ def _extract_section(pdf, page_indices: list, is_actif: bool = False) -> list[tu
                 for row in t:
                     if not row or _is_index_row(row): continue
                     if len(row) < 2: continue
-                    # Détecter si col1 est un numéro romain → label en col2
                     col1 = str(row[1]).strip().replace('\n',' ') if len(row)>1 and row[1] else ''
                     if _ROMAIN_RE.match(col1.strip()):
                         label = str(row[2]).strip().replace('\n',' ') if len(row)>2 and row[2] else ''
@@ -537,14 +501,11 @@ def _extract_section(pdf, page_indices: list, is_actif: bool = False) -> list[tu
                         if col and len(row) >= col: return _parse(row[col-1])
                         return None
                     nv = len(val_cols)
-                    # Pour l'actif : tenir compte des colonnes absentes (ex: Amort vide)
                     if is_actif and nv == 3:
                         gap = val_cols[1] - val_cols[0]
                         if gap > 1:
-                            # Amort absent (saut entre Brut et Net)
                             vals = [gv(val_cols[0]), None, gv(val_cols[1]), gv(val_cols[2])]
                         else:
-                            # NetN1 absent (colonnes consécutives)
                             vals = [gv(val_cols[0]), gv(val_cols[1]), gv(val_cols[2]), None]
                     else:
                         vals = [gv(val_cols[i]) for i in range(min(nv, 4))]
@@ -565,7 +526,7 @@ def _build_value_map(rows: list, template: list) -> dict:
     for label, vals in rows:
         idx = match_label(label, template, used=used)
         if idx < 0: continue
-        if idx in result: continue  # premier match gagne
+        if idx in result: continue
         result[idx] = vals
         used.add(idx)
 
@@ -620,9 +581,9 @@ def parse(pdf_path: str) -> dict:
 
     logger.info(f"AMMC parser : {info.get('raison_sociale','?')} | {info.get('exercice','?')}")
 
-    actif_rows  = _extract_section(pdf, [1], is_actif=True)       # page 2
-    passif_rows = _extract_section(pdf, [2])       # page 3
-    cpc_rows    = _extract_section(pdf, [3, 4])    # pages 4-5
+    actif_rows  = _extract_section(pdf, [1], is_actif=True)
+    passif_rows = _extract_section(pdf, [2])
+    cpc_rows    = _extract_section(pdf, [3, 4])
     pdf.close()
 
     actif_map  = _build_value_map(actif_rows,  ACTIF)
