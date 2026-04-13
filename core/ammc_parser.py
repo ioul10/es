@@ -11,7 +11,7 @@ from core.synonyms import lookup_in_template
 
 logger = get_logger(__name__)
 
-_ROMAIN_RE = re.compile(r'^(XIV|XIII|XII|XI|IX|VIII|VII|VI|IV|XVI|XV|X|V|III|II|I)$', re.I)
+_ROMAIN_RE = re.compile(r'^(I{1,3}|IV|V?I{0,3}|IX|X{1,3}|XIV|XV|XVI)$', re.I)
 
 # ══════════════════════════════════════════════════════════════════
 # TEMPLATE FIXE MCN — AMMC
