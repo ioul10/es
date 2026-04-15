@@ -264,7 +264,7 @@ def _write_ident(wb, info: dict):
         ("Identifiant fiscal",    info.get('identifiant_fiscal','—')),
         ("Taxe professionnelle",  info.get('taxe_professionnelle','—')),
         ("Adresse",               info.get('adresse','—')),
-        ("Date de bilan",         info.get('exercice_fin','—')),
+        ("Date de bilan",         info.get('exercice_fin') or info.get('exercice','—')),
     ]
     for i, (lbl, val) in enumerate(fields, 4):
         ws.row_dimensions[i].height = 18
