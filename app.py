@@ -261,8 +261,8 @@ Dans la **barre latérale gauche**, sélectionnez le format de votre PDF avant d
     st.markdown("**📸 Capture 1 — Sélection du format dans la barre latérale**")
     col_img, col_txt = st.columns([1, 1])
     with col_img:
-        # Placeholder pour la capture — remplacer par st.image("assets/cap1_format.png")
-        st.info("📷 Insérer ici : `st.image('assets/cap1_format.png')`\n\nCapture de la sidebar avec le radio bouton AMMC/DGI sélectionné.")
+        st.image("assets/cap1_format.png")
+        #st.info("📷 Insérer ici : `st.image('assets/cap1_format.png')`\n\nCapture de la sidebar avec le radio bouton AMMC/DGI sélectionné.")
     with col_txt:
         st.markdown("""
 **Comment faire :**
@@ -288,7 +288,7 @@ Le fichier doit être :
     st.markdown("**📸 Capture 2 — Zone d'upload du PDF**")
     col_img2, col_txt2 = st.columns([1, 1])
     with col_img2:
-        st.info("📷 Insérer ici : `st.image('assets/cap2_upload.png')`\n\nCapture de la zone d'upload avec le cadre pointillé.")
+        st.image('assets/cap2_upload.png')
     with col_txt2:
         st.markdown("""
 **Comment faire :**
@@ -311,7 +311,7 @@ Cliquez ensuite sur **Télécharger l'Excel structuré**.
     st.markdown("**📸 Capture 3 — Résultat et bouton de téléchargement**")
     col_img3, col_txt3 = st.columns([1, 1])
     with col_img3:
-        st.info("📷 Insérer ici : `st.image('assets/cap3_resultat.png')`\n\nCapture des KPIs verts et du bouton de téléchargement bleu.")
+        st.image('assets/cap3_resultat.png')
     with col_txt3:
         st.markdown("""
 **Ce que vous obtenez :**
@@ -364,7 +364,7 @@ Le fichier Excel contient **4 feuilles** dans un format fixe et standardisé :
 
     # Capture 4
     st.markdown("**📸 Capture 4 — Exemple de feuille Bilan Actif dans Excel**")
-    st.info("📷 Insérer ici : `st.image('assets/cap4_excel_actif.png', use_column_width=True)`\n\nCapture d'écran de la feuille '2 - Bilan Actif' ouverte dans Excel avec les données réelles.")
+    st.image('assets/cap4_excel_actif.png', use_column_width=True)
 
     st.markdown("---")
     st.info("💡 **Astuce :** Une fois votre Excel généré, passez à l'**Étape 2** : intégrez-le dans la moulinette d'analyse financière pour obtenir les ratios et la notation de l'entreprise.")
