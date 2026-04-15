@@ -93,7 +93,7 @@ def _write_ident(wb, info: dict):
         ("Identifiant fiscal",   info.get('identifiant_fiscal', '—')),
         ("Taxe professionnelle", info.get('taxe_professionnelle', '—')),
         ("Adresse",              info.get('adresse', '—')),
-        ("Exercice",             info.get('exercice', '—')),
+        ("Date de bilan",         info.get('exercice_fin','—')),
         ("Format",               info.get('format', '—')),
     ], 4):
         ws.row_dimensions[i].height = 18
