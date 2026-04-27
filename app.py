@@ -179,25 +179,9 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
             progress.progress(100)
             status.empty()
 
-            info     = parsed['info']
-            raison   = (info.get('raison_sociale') or '—')[:30]
-            exercice = info.get('exercice_fin') or '—'
+            info = parsed['info']
 
-            # KPIs
-            for col, (lbl, val) in zip(st.columns(4), [
-                ("Raison Sociale", raison),
-                ("Date de bilan",  exercice),
-                ("Format",         stats['format']),
-                ("Lignes Excel",   f"{stats['rows']} lignes"),
-            ]):
-                col.markdown(
-                    f'<div class="kpi"><div class="v">{val}</div>'
-                    f'<div class="l">{lbl}</div></div>',
-                    unsafe_allow_html=True
-                )
-
-            st.markdown("<br>", unsafe_allow_html=True)
-
+            # ── Résumé conversion ─────────────────────────────────────────
             st.markdown(f"""<div class="ok">
 ✅ <strong>Conversion réussie</strong>
 &nbsp;·&nbsp; Format <strong>{stats['format']}</strong>
@@ -206,18 +190,107 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
 &nbsp;·&nbsp; CPC : <strong>{stats['cpc']}</strong> lignes
 </div>""", unsafe_allow_html=True)
 
-            fname = (
-                f"FiscalXL_{raison.replace(' ','_')[:20]}"
-                f"_{exercice.replace('/','_')}"
-                f"_{stats['format']}.xlsx"
+            st.markdown("---")
+
+            # ── Formulaire de validation ──────────────────────────────────
+            st.markdown("### ✏️ Vérification et complétion des informations")
+            st.markdown(
+                "Vérifiez les informations extraites du PDF et complétez les champs manquants. "
+                "**Tous les champs marqués * sont obligatoires** pour générer l'Excel."
             )
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    "📥 Télécharger l'Excel structuré",
-                    data=f,
-                    file_name=fname,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+            with st.form("form_validation"):
+                st.markdown("**📋 Informations fiscales**")
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    raison_input = st.text_input(
+                        "Raison sociale *",
+                        value=info.get('raison_sociale', ''),
+                        placeholder="Ex : SOCIÉTÉ MAROCAINE DE ...",
+                    )
+                    if_input = st.text_input(
+                        "Identifiant fiscal *",
+                        value=info.get('identifiant_fiscal', ''),
+                        placeholder="Ex : 4510887",
+                    )
+                with col_f2:
+                    date_input = st.text_input(
+                        "Date de bilan *",
+                        value=info.get('exercice_fin', '') or info.get('exercice', ''),
+                        placeholder="Ex : 31/12/2024",
+                    )
+                    taxe_input = st.text_input(
+                        "Taxe professionnelle",
+                        value=info.get('taxe_professionnelle', ''),
+                        placeholder="Ex : 25725940",
+                    )
+
+                st.markdown("**🏢 Informations commerciales**")
+                col_c1, col_c2 = st.columns(2)
+                with col_c1:
+                    centre_input = st.text_input(
+                        "Centre d'affaires *",
+                        value=info.get('centre_affaires', ''),
+                        placeholder="Ex : Casa Finance, Rabat Centre...",
+                    )
+                with col_c2:
+                    secteur_input = st.selectbox(
+                        "Macro-secteur d'activité *",
+                        options=["— Sélectionner —", "Manufactures", "Services",
+                                 "Commerce", "BTP", "Holding"],
+                    )
+
+                submitted = st.form_submit_button(
+                    "📥 Générer et télécharger l'Excel",
+                    use_container_width=True,
+                    type="primary"
                 )
+
+            if submitted:
+                errors = []
+                if not raison_input.strip():  errors.append("Raison sociale")
+                if not if_input.strip():      errors.append("Identifiant fiscal")
+                if not date_input.strip():    errors.append("Date de bilan")
+                if not centre_input.strip():  errors.append("Centre d'affaires")
+                if secteur_input == "— Sélectionner —":
+                    errors.append("Macro-secteur d'activité")
+
+                if errors:
+                    st.markdown(
+                        f'<div class="er">❌ <strong>Champs obligatoires manquants :</strong> '
+                        f'{", ".join(errors)}</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    info['raison_sociale']      = raison_input.strip()
+                    info['identifiant_fiscal']   = if_input.strip()
+                    info['exercice_fin']          = date_input.strip()
+                    info['taxe_professionnelle'] = taxe_input.strip()
+                    info['centre_affaires']       = centre_input.strip()
+                    info['macro_secteur']         = secteur_input
+                    parsed['info'] = info
+
+                    with st.spinner("Génération de l'Excel..."):
+                        stats2 = write(parsed, output_path)
+
+                    fname = (
+                        f"FiscalXL_{raison_input.strip().replace(' ', '_')[:20]}"
+                        f"_{date_input.strip().replace('/', '_')}"
+                        f"_{stats2['format']}.xlsx"
+                    )
+                    with open(output_path, "rb") as f_dl:
+                        st.download_button(
+                            "📥 Télécharger l'Excel",
+                            data=f_dl,
+                            file_name=fname,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_final"
+                        )
+                    st.markdown(f"""<div class="ok">
+✅ <strong>Excel prêt</strong> &nbsp;·&nbsp;
+<strong>{raison_input.strip()[:30]}</strong> &nbsp;·&nbsp;
+{date_input.strip()} &nbsp;·&nbsp; {secteur_input}
+</div>""", unsafe_allow_html=True)
 
         except Exception as e:
             logger.exception("Erreur conversion")
@@ -261,8 +334,8 @@ Dans la **barre latérale gauche**, sélectionnez le format de votre PDF avant d
     st.markdown("**📸 Capture 1 — Sélection du format dans la barre latérale**")
     col_img, col_txt = st.columns([1, 1])
     with col_img:
-        st.image("assets/cap1_format.png")
-        #st.info("📷 Insérer ici : `st.image('assets/cap1_format.png')`\n\nCapture de la sidebar avec le radio bouton AMMC/DGI sélectionné.")
+        # Placeholder pour la capture — remplacer par st.image("assets/cap1_format.png")
+        st.info("📷 Insérer ici : `st.image('assets/cap1_format.png')`\n\nCapture de la sidebar avec le radio bouton AMMC/DGI sélectionné.")
     with col_txt:
         st.markdown("""
 **Comment faire :**
@@ -288,7 +361,7 @@ Le fichier doit être :
     st.markdown("**📸 Capture 2 — Zone d'upload du PDF**")
     col_img2, col_txt2 = st.columns([1, 1])
     with col_img2:
-        st.image('assets/cap2_upload.png')
+        st.info("📷 Insérer ici : `st.image('assets/cap2_upload.png')`\n\nCapture de la zone d'upload avec le cadre pointillé.")
     with col_txt2:
         st.markdown("""
 **Comment faire :**
@@ -311,7 +384,7 @@ Cliquez ensuite sur **Télécharger l'Excel structuré**.
     st.markdown("**📸 Capture 3 — Résultat et bouton de téléchargement**")
     col_img3, col_txt3 = st.columns([1, 1])
     with col_img3:
-        st.image('assets/cap3_resultat.png')
+        st.info("📷 Insérer ici : `st.image('assets/cap3_resultat.png')`\n\nCapture des KPIs verts et du bouton de téléchargement bleu.")
     with col_txt3:
         st.markdown("""
 **Ce que vous obtenez :**
@@ -364,7 +437,7 @@ Le fichier Excel contient **4 feuilles** dans un format fixe et standardisé :
 
     # Capture 4
     st.markdown("**📸 Capture 4 — Exemple de feuille Bilan Actif dans Excel**")
-    st.image('assets/cap4_excel_actif.png', use_column_width=True)
+    st.info("📷 Insérer ici : `st.image('assets/cap4_excel_actif.png', use_column_width=True)`\n\nCapture d'écran de la feuille '2 - Bilan Actif' ouverte dans Excel avec les données réelles.")
 
     st.markdown("---")
     st.info("💡 **Astuce :** Une fois votre Excel généré, passez à l'**Étape 2** : intégrez-le dans la moulinette d'analyse financière pour obtenir les ratios et la notation de l'entreprise.")
@@ -506,5 +579,4 @@ Pour tout problème de conversion ou PDF non reconnu, contacter l'équipe techni
 - Le fichier PDF concerné
 - Le format attendu (AMMC ou DGI)
 - Le message d'erreur affiché
-ioulmadani@gmail.com 
 """)
