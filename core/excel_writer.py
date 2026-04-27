@@ -16,13 +16,14 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-C_DARK   = "1F3864"
+C_DARK   = "1F4E79"
 C_MED    = "2E75B6"
 C_LIGHT  = "D6E4F0"
 C_RESULT = "2E4057"
 C_WHITE  = "FFFFFF"
 C_GRAY   = "F5F7FA"
 C_BORDER = "B8CCE4"
+C_GOLD   = "FFF2CC"
 NUM_FMT  = '#,##0.00;[Red]-#,##0.00;"-"'
 
 # ── Styles ────────────────────────────────────────────────────────────────────
@@ -44,7 +45,6 @@ def _c(ws, r, c, v=None, bg=C_WHITE, fg="222222", bold=False,
     return cell
 
 def _row_colors(typ: str):
-    """(bg, fg, bold) selon le type de poste."""
     if typ == 'total':   return C_DARK,   C_WHITE, True
     if typ == 'result':  return C_RESULT, C_WHITE, True
     if typ == 'section': return C_LIGHT,  C_DARK,  True
@@ -55,7 +55,7 @@ def _row_colors(typ: str):
 def _title_block(ws, title: str, info: dict, n_cols: int) -> int:
     raison   = info.get('raison_sociale', '')
     if_num   = info.get('identifiant_fiscal', '')
-    exercice = info.get('exercice', '')
+    exercice = info.get('exercice_fin', '') or info.get('exercice', '')
 
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
     _c(ws, 1, 1, title, bg=C_DARK, fg=C_WHITE, bold=True, align='center', sz=12)
@@ -66,7 +66,7 @@ def _title_block(ws, title: str, info: dict, n_cols: int) -> int:
     _c(ws, 2, n_cols, f"IF : {if_num}", bg=C_LIGHT, fg=C_DARK, align='right', sz=9)
 
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=n_cols)
-    _c(ws, 3, 1, f"Exercice : {exercice}", bg=C_GRAY, fg="555555", sz=9, indent=1)
+    _c(ws, 3, 1, f"Date de bilan : {exercice}", bg=C_GRAY, fg="555555", sz=9, indent=1)
     ws.row_dimensions[4].height = 4
     return 5
 
@@ -78,6 +78,7 @@ def _write_ident(wb, info: dict):
     ws.column_dimensions['A'].width = 26
     ws.column_dimensions['B'].width = 54
 
+    # Titre principal
     ws.merge_cells('A1:B1')
     _c(ws, 1, 1, "PIÈCES ANNEXES À LA DÉCLARATION FISCALE",
        bg=C_DARK, fg=C_WHITE, bold=True, align='center', sz=13)
@@ -88,25 +89,47 @@ def _write_ident(wb, info: dict):
        bg=C_MED, fg=C_WHITE, align='center', sz=10)
     ws.row_dimensions[2].height = 18
 
-    for i, (lbl, val) in enumerate([
+    # Séparateur
+    ws.merge_cells('A3:B3')
+    _c(ws, 3, 1, "▌ Informations fiscales", bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
+    ws.row_dimensions[3].height = 16
+
+    # Champs extraits du PDF
+    fiscal_fields = [
         ("Raison sociale",       info.get('raison_sociale', '—')),
         ("Identifiant fiscal",   info.get('identifiant_fiscal', '—')),
         ("Taxe professionnelle", info.get('taxe_professionnelle', '—')),
         ("Adresse",              info.get('adresse', '—')),
-        ("Date de bilan",         info.get('exercice_fin','—')),
-        ("Format",               info.get('format', '—')),
-    ], 4):
-        ws.row_dimensions[i].height = 18
-        _c(ws, i, 1, lbl, bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
-        _c(ws, i, 2, val, bg=C_WHITE,  fg="222222", sz=9, indent=1)
+        ("Date de bilan",        info.get('exercice_fin', '—') or info.get('exercice', '—')),
+        ("Format PDF",           info.get('format', '—')),
+    ]
+    r = 4
+    for lbl, val in fiscal_fields:
+        ws.row_dimensions[r].height = 18
+        _c(ws, r, 1, lbl, bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
+        _c(ws, r, 2, val, bg=C_WHITE,  fg="222222", sz=9, indent=1)
+        r += 1
+
+    # Séparateur section commerciale
+    ws.merge_cells(f'A{r}:B{r}')
+    _c(ws, r, 1, "▌ Informations commerciales", bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
+    ws.row_dimensions[r].height = 16
+    r += 1
+
+    # Champs commerciaux (centre d'affaires + macro-secteur)
+    commercial_fields = [
+        ("Centre d'affaires",    info.get('centre_affaires', '—')),
+        ("Macro-secteur",        info.get('macro_secteur', '—')),
+    ]
+    for lbl, val in commercial_fields:
+        ws.row_dimensions[r].height = 18
+        _c(ws, r, 1, lbl, bg=C_GOLD, fg=C_DARK, bold=True, sz=9, indent=1)
+        _c(ws, r, 2, val, bg=C_WHITE, fg="222222", sz=9, indent=1)
+        r += 1
 
 # ── Feuille Bilan Actif ───────────────────────────────────────────────────────
 
 def _write_actif(wb, info: dict, template: list, value_map: dict):
-    """
-    template : liste de (key, label, type) — 49 entrées pour AMMC
-    value_map : {idx: [brut, amort, net_n, net_n1]}
-    """
     ws = wb.create_sheet("2 - Bilan Actif")
     ws.sheet_view.showGridLines = False
     n = 5
@@ -129,9 +152,7 @@ def _write_actif(wb, info: dict, template: list, value_map: dict):
         bg, fg, bold = _row_colors(typ)
         ws.row_dimensions[r].height = 15 if typ == 'normal' else 17
         indent = 1 if typ == 'normal' else 0
-
         _c(ws, r, 1, label, bg=bg, fg=fg, bold=bold, align='left', sz=9, indent=indent)
-
         vals = value_map.get(ti, [])
         for ci in range(4):
             v = vals[ci] if ci < len(vals) else None
@@ -150,9 +171,9 @@ def _write_passif(wb, info: dict, template: list, value_map: dict):
     r = _title_block(ws, "BILAN PASSIF", info, n)
 
     for ci, (h, w) in enumerate([
-        ("DÉSIGNATION",    54),
-        ("EXERCICE N",     20),
-        ("EXERCICE N-1",   20),
+        ("DÉSIGNATION",  54),
+        ("EXERCICE N",   20),
+        ("EXERCICE N-1", 20),
     ], 1):
         _c(ws, r, ci, h, bg=C_MED, fg=C_WHITE, bold=True, align='center', sz=9)
         ws.column_dimensions[get_column_letter(ci)].width = w
@@ -164,7 +185,6 @@ def _write_passif(wb, info: dict, template: list, value_map: dict):
         bg, fg, bold = _row_colors(typ)
         ws.row_dimensions[r].height = 15 if typ == 'normal' else 17
         indent = 1 if typ == 'normal' else 0
-
         _c(ws, r, 1, label, bg=bg, fg=fg, bold=bold, align='left', sz=9, indent=indent)
         vals = value_map.get(ti, [])
         for ci in range(2):
@@ -173,7 +193,6 @@ def _write_passif(wb, info: dict, template: list, value_map: dict):
                bg=bg, fg=fg, bold=bold, align='right', sz=9, num_fmt=NUM_FMT)
         r += 1
 
-    # Note légale
     r2 = r + 1
     ws.merge_cells(start_row=r2, start_column=1, end_row=r2, end_column=3)
     c = ws.cell(r2, 1)
@@ -184,14 +203,13 @@ def _write_passif(wb, info: dict, template: list, value_map: dict):
 
 # ── Feuille CPC ───────────────────────────────────────────────────────────────
 
-# Numéros romains pour chaque ligne CPC (selon la loi MCN)
 _CPC_NUMS = [
-    '',    '',    '',    '',    '',    '',    '',    '',    '',    'I',    # 0-9   Total I
-    '',    '',    '',    '',    '',    '',    '',    '',    'II',  'III',  # 10-19 Total II / Rés.Exploit
-    '',    '',    '',    '',    '',    'IV',  '',    '',    '',    '',     # 20-29 Total IV
-    '',    'V',   'VI',  'VII', '',    '',    '',    '',    '',    '',     # 30-39 Total V / VI / VII
-    'VIII','',    '',    '',    '',    '',    'IX',  'X',   'XI',  'XII',  # 40-49 Total VIII/IX / X/XI/XII
-    'XIII','XIV', 'XV',  'XVI',                                           # 50-53 XIII/XIV/XV/XVI
+    '',    '',    '',    '',    '',    '',    '',    '',    '',    'I',
+    '',    '',    '',    '',    '',    '',    '',    '',    'II',  'III',
+    '',    '',    '',    '',    '',    'IV',  '',    '',    '',    '',
+    '',    'V',   'VI',  'VII', '',    '',    '',    '',    '',    '',
+    'VIII','',    '',    '',    '',    '',    'IX',  'X',   'XI',  'XII',
+    'XIII','XIV', 'XV',  'XVI',
 ]
 
 def _write_cpc(wb, info: dict, template: list, value_map: dict):
@@ -218,13 +236,11 @@ def _write_cpc(wb, info: dict, template: list, value_map: dict):
         bg, fg, bold = _row_colors(typ)
         ws.row_dimensions[r].height = 15 if typ == 'normal' else 17
         indent = 1 if typ == 'normal' else 0
-
         num = _CPC_NUMS[ti] if ti < len(_CPC_NUMS) else ''
         _c(ws, r, 1, num or None, bg=bg,
            fg=fg if typ != 'normal' else C_MED,
            bold=True, align='center', sz=8)
         _c(ws, r, 2, label, bg=bg, fg=fg, bold=bold, align='left', sz=9, indent=indent)
-
         vals = value_map.get(ti, [])
         for ci in range(4):
             v = vals[ci] if ci < len(vals) else None
@@ -232,7 +248,6 @@ def _write_cpc(wb, info: dict, template: list, value_map: dict):
                bg=bg, fg=fg, bold=bold, align='right', sz=9, num_fmt=NUM_FMT)
         r += 1
 
-    # Notes
     r2 = r + 1
     ws.merge_cells(start_row=r2, start_column=1, end_row=r2, end_column=6)
     c = ws.cell(r2, 1)
@@ -244,10 +259,6 @@ def _write_cpc(wb, info: dict, template: list, value_map: dict):
 # ── Point d'entrée ────────────────────────────────────────────────────────────
 
 def write(parsed: dict, output_path: str) -> dict:
-    """
-    Génère l'Excel structuré depuis les données parsées.
-    parsed = résultat de ammc_parser.parse() ou dgi_parser.parse()
-    """
     info      = parsed['info']
     templates = parsed['templates']
     fmt       = parsed.get('format', '?')
