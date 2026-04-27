@@ -510,6 +510,9 @@ def _extract_section(pdf, page_indices: list, is_actif: bool = False) -> list[tu
     for idx in page_indices:
         if idx >= len(pdf.pages): continue
         page = pdf.pages[idx]
+        if getattr(page, 'rotation', 0) in (90, 270):
+            page = page.rotate(-page.rotation)
+            logger.info(f"  page {idx+1} : rotation corrigée")
         tables = page.extract_tables()
         good = [t for t in tables
                 if t and len(t) >= 3 and t[0] and len(t[0]) >= 2
