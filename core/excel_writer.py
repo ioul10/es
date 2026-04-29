@@ -1,621 +1,278 @@
 """
-core/dgi_parser.py
-Parser DGI (7 pages) : extrait les valeurs et les mappe sur le template fixe MCN.
-Template fixe = même structure pour tous les PDFs AMMC, quelle que soit la mise en page.
+core/excel_writer.py
+Génère l'Excel structuré à partir des données parsées (AMMC ou DGI).
+Structure IDENTIQUE pour les deux formats :
+  - 1 - Identification
+  - 2 - Bilan Actif    : Label | Brut | Amort. | Net(N) | Net(N-1)
+  - 3 - Bilan Passif   : Label | Exercice N | Exercice N-1
+  - 4 - CPC            : N° | Label | Propres N | Exerc.Préc | Total N | Total N-1
 """
-import re, unicodedata
-from collections import defaultdict
-import pdfplumber
+
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from utils.logger import get_logger
-from core.synonyms import lookup_in_template
 
 logger = get_logger(__name__)
 
-_DGI_PREFIX = re.compile(r'^[\*\.]?\s*(I{{1,3}}|IV|V?I{{0,3}}|IX|X{{1,3}}|XIV|XV|XVI)\.\s*', re.I)
+# ── Palette ───────────────────────────────────────────────────────────────────
+C_DARK   = "1F4E79"
+C_MED    = "2E75B6"
+C_LIGHT  = "D6E4F0"
+C_RESULT = "2E4057"
+C_WHITE  = "FFFFFF"
+C_GRAY   = "F5F7FA"
+C_BORDER = "B8CCE4"
+C_GOLD   = "FFF2CC"
+NUM_FMT  = '#,##0.00;[Red]-#,##0.00;"-"'
 
-_ROMAIN_RE = re.compile(r'^(I{1,3}|IV|V?I{0,3}|IX|X{1,3}|XIV|XV|XVI)$', re.I)
+# ── Styles ────────────────────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════
-# TEMPLATE FIXE MCN — AMMC
-# (key_normalisée, label_affiché, type)
-# ══════════════════════════════════════════════════════════════════
+def _border():
+    s = Side(style='thin', color=C_BORDER)
+    return Border(top=s, bottom=s, left=s, right=s)
 
-ACTIF = [
-    ('immobilisations non valeurs',          'Immobilisations en non valeurs [A]',             'section'),
-    ('frais preliminaires',                  'Frais préliminaires',                             'normal'),
-    ('charges repartir',                     'Charges à répartir sur plusieurs exercices',      'normal'),
-    ('primes remboursement obligations',     'Primes de remboursement des obligations',         'normal'),
-    ('immobilisations incorporelles',        'Immobilisations incorporelles [B]',               'section'),
-    ('immobilisations recherche',            'Immobilisations en Recherche et Développement',   'normal'),
-    ('brevets marques droits',               'Brevets, marques, droits et valeurs similaires',  'normal'),
-    ('fonds commercial',                     'Fonds commercial',                                'normal'),
-    ('autres immobilisations incorporelles', 'Autres immobilisations incorporelles',            'normal'),
-    ('immobilisations corporelles',          'Immobilisations corporelles [C]',                 'section'),
-    ('terrains',                             'Terrains',                                        'normal'),
-    ('constructions',                        'Constructions',                                   'normal'),
-    ('installations techniques',             'Installations techniques, matériel et outillage', 'normal'),
-    ('materiel transport',                   'Matériel de transport',                           'normal'),
-    ('mobilier materiel bureau',             'Mobilier, Mat. de bureau, Aménagement divers',    'normal'),
-    ('autres immobilisations corporelles',   'Autres immobilisations corporelles',              'normal'),
-    ('immobilisations corporelles cours',    'Immobilisations corporelles en cours',            'normal'),
-    ('immobilisations financieres',          'Immobilisations financières [D]',                 'section'),
-    ('prets immobilises',                    'Prêts immobilisés',                               'normal'),
-    ('autres creances financieres',          'Autres créances financières',                     'normal'),
-    ('titres participation',                 'Titres de participation',                         'normal'),
-    ('autres titres immobilises',            'Autres titres immobilisés',                       'normal'),
-    ('ecarts conversion actif immobilise',   'Écarts de conversion actif [E]',                  'section'),
-    ('diminution creances immobilisees',     'Diminution des créances immobilisées',            'normal'),
-    ('augmentations dettes financement',     'Augmentations des dettes de financement',         'normal'),
-    ('total i actif',                        'TOTAL I (A+B+C+D+E)',                             'total'),
-    ('stocks',                               'Stocks [F]',                                      'section'),
-    ('marchandises',                         'Marchandises',                                    'normal'),
-    ('matieres fournitures consommables',    'Matières et fournitures consommables',            'normal'),
-    ('produits cours',                       'Produits en cours',                               'normal'),
-    ('produits intermediaires residuels',    'Produits intermédiaires et produits résiduels',   'normal'),
-    ('produits finis',                       'Produits finis',                                  'normal'),
-    ('creances actif circulant',             "Créances de l'actif circulant [G]",               'section'),
-    ('fournisseurs debiteurs avances',       'Fournisseurs débiteurs, avances et acomptes',     'normal'),
-    ('clients comptes rattaches',            'Clients et comptes rattachés',                    'normal'),
-    ('personnel actif circulant',            'Personnel',                                       'normal'),
-    ('etat actif',                           'État',                                            'normal'),
-    ('comptes associes actif',               "Comptes d'associés",                              'normal'),
-    ('autres debiteurs',                     'Autres débiteurs',                                'normal'),
-    ('comptes regularisation actif',         'Comptes de régularisation - Actif',               'normal'),
-    ('titres valeurs placement',             'Titres et valeurs de placement [H]',              'section'),
-    ('ecarts conversion actif circulant',    'Écarts de conversion actif [I]',                  'section'),
-    ('total ii actif',                       'TOTAL II (F+G+H+I)',                              'total'),
-    ('tresorerie actif',                     'Trésorerie - Actif',                              'section'),
-    ('cheques valeurs encaisser',            'Chèques et valeurs à encaisser',                  'normal'),
-    ('banques tg ccp',                       'Banques, T.G et C.C.P',                          'normal'),
-    ('caisse regie avances',                 "Caisse, Régie d'avances et accréditifs",         'normal'),
-    ('total iii actif',                      'TOTAL III',                                       'total'),
-    ('total general actif',                  'TOTAL GÉNÉRAL I+II+III',                          'total'),
+def _c(ws, r, c, v=None, bg=C_WHITE, fg="222222", bold=False,
+       align="left", num_fmt=None, sz=9, wrap=True, indent=0):
+    cell = ws.cell(row=r, column=c, value=v)
+    cell.font      = Font(name="Arial", size=sz, bold=bold, color=fg)
+    cell.fill      = PatternFill("solid", fgColor=bg)
+    cell.alignment = Alignment(horizontal=align, vertical="center",
+                               wrap_text=wrap, indent=indent)
+    cell.border    = _border()
+    if num_fmt:
+        cell.number_format = num_fmt
+    return cell
+
+def _row_colors(typ: str):
+    if typ == 'total':   return C_DARK,   C_WHITE, True
+    if typ == 'result':  return C_RESULT, C_WHITE, True
+    if typ == 'section': return C_LIGHT,  C_DARK,  True
+    return C_WHITE, "333333", False
+
+# ── Bloc titre commun ─────────────────────────────────────────────────────────
+
+def _title_block(ws, title: str, info: dict, n_cols: int) -> int:
+    raison   = info.get('raison_sociale', '')
+    if_num   = info.get('identifiant_fiscal', '')
+    exercice = info.get('exercice_fin', '') or info.get('exercice', '')
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+    _c(ws, 1, 1, title, bg=C_DARK, fg=C_WHITE, bold=True, align='center', sz=12)
+    ws.row_dimensions[1].height = 22
+
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max(1, n_cols-1))
+    _c(ws, 2, 1, f"Raison sociale : {raison}", bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
+    _c(ws, 2, n_cols, f"IF : {if_num}", bg=C_LIGHT, fg=C_DARK, align='right', sz=9)
+
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=n_cols)
+    _c(ws, 3, 1, f"Date de bilan : {exercice}", bg=C_GRAY, fg="555555", sz=9, indent=1)
+    ws.row_dimensions[4].height = 4
+    return 5
+
+# ── Feuille Identification ────────────────────────────────────────────────────
+
+def _write_ident(wb, info: dict):
+    ws = wb.create_sheet("1 - Identification")
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions['A'].width = 26
+    ws.column_dimensions['B'].width = 54
+
+    # Titre principal
+    ws.merge_cells('A1:B1')
+    _c(ws, 1, 1, "PIÈCES ANNEXES À LA DÉCLARATION FISCALE",
+       bg=C_DARK, fg=C_WHITE, bold=True, align='center', sz=13)
+    ws.row_dimensions[1].height = 26
+
+    ws.merge_cells('A2:B2')
+    _c(ws, 2, 1, "IMPÔTS SUR LES SOCIÉTÉS — Modèle Comptable Normal (loi 9-88)",
+       bg=C_MED, fg=C_WHITE, align='center', sz=10)
+    ws.row_dimensions[2].height = 18
+
+    # Séparateur
+    ws.merge_cells('A3:B3')
+    _c(ws, 3, 1, "▌ Informations fiscales", bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
+    ws.row_dimensions[3].height = 16
+
+    # Champs extraits du PDF
+    fiscal_fields = [
+        ("Raison sociale",       info.get('raison_sociale', '—')),
+        ("Identifiant fiscal",   info.get('identifiant_fiscal', '—')),
+        ("Taxe professionnelle", info.get('taxe_professionnelle', '—')),
+        ("Adresse",              info.get('adresse', '—')),
+        ("Date de bilan",        info.get('exercice_fin', '—') or info.get('exercice', '—')),
+        ("Format PDF",           info.get('format', '—')),
+    ]
+    r = 4
+    for lbl, val in fiscal_fields:
+        ws.row_dimensions[r].height = 18
+        _c(ws, r, 1, lbl, bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
+        _c(ws, r, 2, val, bg=C_WHITE,  fg="222222", sz=9, indent=1)
+        r += 1
+
+    # Séparateur section commerciale
+    ws.merge_cells(f'A{r}:B{r}')
+    _c(ws, r, 1, "▌ Informations commerciales", bg=C_LIGHT, fg=C_DARK, bold=True, sz=9, indent=1)
+    ws.row_dimensions[r].height = 16
+    r += 1
+
+    # Champs commerciaux (centre d'affaires + macro-secteur)
+    commercial_fields = [
+        ("Centre d'affaires",    info.get('centre_affaires', '—')),
+        ("Macro-secteur",        info.get('macro_secteur', '—')),
+    ]
+    for lbl, val in commercial_fields:
+        ws.row_dimensions[r].height = 18
+        _c(ws, r, 1, lbl, bg=C_GOLD, fg=C_DARK, bold=True, sz=9, indent=1)
+        _c(ws, r, 2, val, bg=C_WHITE, fg="222222", sz=9, indent=1)
+        r += 1
+
+# ── Feuille Bilan Actif ───────────────────────────────────────────────────────
+
+def _write_actif(wb, info: dict, template: list, value_map: dict):
+    ws = wb.create_sheet("2 - Bilan Actif")
+    ws.sheet_view.showGridLines = False
+    n = 5
+    r = _title_block(ws, "BILAN ACTIF", info, n)
+
+    for ci, (h, w) in enumerate([
+        ("DÉSIGNATION",         50),
+        ("BRUT",                18),
+        ("AMORT. & PROV.",      18),
+        ("NET — EXERCICE N",    18),
+        ("NET — EXERCICE N-1",  18),
+    ], 1):
+        _c(ws, r, ci, h, bg=C_MED, fg=C_WHITE, bold=True, align='center', sz=9, wrap=True)
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[r].height = 28
+    ws.freeze_panes = f'A{r+1}'
+    r += 1
+
+    for ti, (key, label, typ) in enumerate(template):
+        bg, fg, bold = _row_colors(typ)
+        ws.row_dimensions[r].height = 15 if typ == 'normal' else 17
+        indent = 1 if typ == 'normal' else 0
+        _c(ws, r, 1, label, bg=bg, fg=fg, bold=bold, align='left', sz=9, indent=indent)
+        vals = value_map.get(ti, [])
+        for ci in range(4):
+            v = vals[ci] if ci < len(vals) else None
+            _c(ws, r, ci+2, 0 if v is None else v,
+               bg=bg, fg=fg, bold=bold, align='right', sz=9, num_fmt=NUM_FMT)
+        r += 1
+
+    return r - 6
+
+# ── Feuille Bilan Passif ──────────────────────────────────────────────────────
+
+def _write_passif(wb, info: dict, template: list, value_map: dict):
+    ws = wb.create_sheet("3 - Bilan Passif")
+    ws.sheet_view.showGridLines = False
+    n = 3
+    r = _title_block(ws, "BILAN PASSIF", info, n)
+
+    for ci, (h, w) in enumerate([
+        ("DÉSIGNATION",  54),
+        ("EXERCICE N",   20),
+        ("EXERCICE N-1", 20),
+    ], 1):
+        _c(ws, r, ci, h, bg=C_MED, fg=C_WHITE, bold=True, align='center', sz=9)
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[r].height = 22
+    ws.freeze_panes = f'A{r+1}'
+    r += 1
+
+    for ti, (key, label, typ) in enumerate(template):
+        bg, fg, bold = _row_colors(typ)
+        ws.row_dimensions[r].height = 15 if typ == 'normal' else 17
+        indent = 1 if typ == 'normal' else 0
+        _c(ws, r, 1, label, bg=bg, fg=fg, bold=bold, align='left', sz=9, indent=indent)
+        vals = value_map.get(ti, [])
+        for ci in range(2):
+            v = vals[ci] if ci < len(vals) else None
+            _c(ws, r, ci+2, 0 if v is None else v,
+               bg=bg, fg=fg, bold=bold, align='right', sz=9, num_fmt=NUM_FMT)
+        r += 1
+
+    r2 = r + 1
+    ws.merge_cells(start_row=r2, start_column=1, end_row=r2, end_column=3)
+    c = ws.cell(r2, 1)
+    c.value = "(1) Capital personnel débiteur.  (2) Bénéficiaire (+) / Déficitaire (−)."
+    c.font  = Font(name="Arial", italic=True, size=8, color="888888")
+    c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    return r - 6
+
+# ── Feuille CPC ───────────────────────────────────────────────────────────────
+
+_CPC_NUMS = [
+    '',    '',    '',    '',    '',    '',    '',    '',    '',    'I',
+    '',    '',    '',    '',    '',    '',    '',    '',    'II',  'III',
+    '',    '',    '',    '',    '',    'IV',  '',    '',    '',    '',
+    '',    'V',   'VI',  'VII', '',    '',    '',    '',    '',    '',
+    'VIII','',    '',    '',    '',    '',    'IX',  'X',   'XI',  'XII',
+    'XIII','XIV', 'XV',  'XVI',
 ]
 
-PASSIF = [
-    ('capitaux propres',                     'CAPITAUX PROPRES',                                'section'),
-    ('capital social personnel',             'Capital social ou personnel (1)',                 'normal'),
-    ('moins actionnaires capital',           'Moins : actionnaires, capital souscrit non appelé','normal'),
-    ('capital appele',                       'Capital appelé',                                  'normal'),
-    ('dont verse',                           'Dont versé',                                      'normal'),
-    ('prime emission fusion',                "Prime d'émission, de fusion, d'apport",           'normal'),
-    ('ecarts reevaluation',                  'Écarts de réévaluation',                          'normal'),
-    ('reserve legale',                       'Réserve légale',                                  'normal'),
-    ('autres reserves',                      'Autres réserves',                                 'normal'),
-    ('report nouveau',                       'Report à nouveau (2)',                            'normal'),
-    ('resultat instance affectation',        "Résultat en instance d'affectation (2)",          'normal'),
-    ('resultat net exercice',                "Résultat net de l'exercice (2)",                  'normal'),
-    ('total capitaux propres',               'Total des capitaux propres (A)',                  'total'),
-    ('capitaux propres assimiles',           'Capitaux propres assimilés (B)',                  'section'),
-    ('subvention investissement',            "Subvention d'investissement",                     'normal'),
-    ('provisions reglementees',              'Provisions réglementées',                         'normal'),
-    ('dettes financement',                   'Dettes de financement (C)',                       'section'),
-    ('emprunts obligataires',                'Emprunts obligataires',                           'normal'),
-    ('autres dettes financement',            'Autres dettes de financement',                    'normal'),
-    ('provisions durables risques',          'Provisions durables pour risques et charges (D)', 'section'),
-    ('provisions risques',                   'Provisions pour risques',                         'normal'),
-    ('provisions charges',                   'Provisions pour charges',                         'normal'),
-    ('ecarts conversion passif financement', 'Écarts de conversion passif (E)',                 'section'),
-    ('augmentation creances immobilisees',   'Augmentation des créances immobilisées',          'normal'),
-    ('diminution dettes financement',        'Diminution des dettes de financement',            'normal'),
-    ('total i passif',                       'TOTAL I (A+B+C+D+E)',                             'total'),
-    ('dettes passif circulant',              'Dettes du passif circulant (F)',                  'section'),
-    ('fournisseurs comptes rattaches',       'Fournisseurs et comptes rattachés',               'normal'),
-    ('clients crediteurs avances',           'Clients créditeurs, avances et acomptes',         'normal'),
-    ('personnel passif',                     'Personnel',                                       'normal'),
-    ('organismes sociaux',                   'Organismes sociaux',                              'normal'),
-    ('etat passif',                          'État',                                            'normal'),
-    ('comptes associes passif',              "Comptes d'associés",                              'normal'),
-    ('autres creanciers',                    'Autres créanciers',                               'normal'),
-    ('comptes regularisation passif',        'Comptes de régularisation passif',                'normal'),
-    ('autres provisions risques charges',    'Autres provisions pour risques et charges (G)',   'normal'),
-    ('ecarts conversion passif circulant',   'Écarts de conversion passif (H)',                 'normal'),
-    ('total ii passif',                      'TOTAL II (F+G+H)',                                'total'),
-    ('tresorerie passif',                    'TRÉSORERIE PASSIF',                               'section'),
-    ('credits escompte',                     "Crédits d'escompte",                              'normal'),
-    ('credits tresorerie',                   'Crédits de trésorerie',                           'normal'),
-    ('banques soldes crediteurs',            'Banques (soldes créditeurs)',                     'normal'),
-    ('total iii passif',                     'TOTAL III',                                       'total'),
-    ('total general passif',                 'TOTAL GÉNÉRAL I+II+III',                          'total'),
-]
+def _write_cpc(wb, info: dict, template: list, value_map: dict):
+    ws = wb.create_sheet("4 - CPC")
+    ws.sheet_view.showGridLines = False
+    n = 6
+    r = _title_block(ws, "COMPTE DE PRODUITS ET CHARGES (Hors Taxes)", info, n)
 
-CPC = [
-    ('produits exploitation',                "PRODUITS D'EXPLOITATION",                         'section'),
-    ('ventes marchandises',                  "Ventes de marchandises (en l'état)",             'normal'),
-    ('ventes biens services',                'Ventes de biens et services produits',            'normal'),
-    ('chiffres affaires',                    "Chiffre d'affaires",                              'normal'),
-    ('variation stocks produits',            'Variation de stocks de produits (±)',             'normal'),
-    ('immobilisations produites',            "Immobilisations produites par l'entreprise",      'normal'),
-    ('subventions exploitation',             "Subventions d'exploitation",                      'normal'),
-    ('autres produits exploitation',         "Autres produits d'exploitation",                  'normal'),
-    ('reprises exploitation',                "Reprises d'exploitation ; transferts de charges", 'normal'),
-    ('total i cpc',                          'Total I',                                         'total'),
-    ('charges exploitation',                 "CHARGES D'EXPLOITATION",                          'section'),
-    ('achats revendus marchandises',         'Achats revendus de marchandises',                 'normal'),
-    ('achats consommes matieres',            'Achats consommés de matières et fournitures',     'normal'),
-    ('autres charges externes',              'Autres charges externes',                         'normal'),
-    ('impots taxes',                         'Impôts et taxes',                                 'normal'),
-    ('charges personnel',                    'Charges de personnel',                            'normal'),
-    ('autres charges exploitation',          "Autres charges d'exploitation",                   'normal'),
-    ('dotations exploitation',               "Dotations d'exploitation",                        'normal'),
-    ('total ii cpc',                         'Total II',                                        'total'),
-    ('resultat exploitation',                "RÉSULTAT D'EXPLOITATION (I-II)",                  'result'),
-    ('produits financiers',                  'PRODUITS FINANCIERS',                             'section'),
-    ('produits titres participation',        'Produits des titres de participation',            'normal'),
-    ('gains change',                         'Gains de change',                                 'normal'),
-    ('interets autres produits financiers',  'Intérêts et autres produits financiers',          'normal'),
-    ('reprises financieres',                 'Reprises financières ; transferts de charges',    'normal'),
-    ('total iv',                             'Total IV',                                        'total'),
-    ('charges financieres section',          'CHARGES FINANCIÈRES',                             'section'),
-    ('charges interets',                     "Charges d'intérêts",                              'normal'),
-    ('pertes change',                        'Pertes de change',                                'normal'),
-    ('autres charges financieres',           'Autres charges financières',                      'normal'),
-    ('dotations financieres',                'Dotations financières',                           'normal'),
-    ('total v',                              'Total V',                                         'total'),
-    ('resultat financier',                   'RÉSULTAT FINANCIER (IV-V)',                       'result'),
-    ('resultat courant',                     'RÉSULTAT COURANT (III+VI)',                       'result'),
-    ('produits non courants',                'PRODUITS NON COURANTS',                           'section'),
-    ('produits cessions immobilisations',    "Produits des cessions d'immobilisations",         'normal'),
-    ('subventions equilibre',                "Subventions d'équilibre",                         'normal'),
-    ('reprises subventions investissement',  "Reprises sur subventions d'investissement",       'normal'),
-    ('autres produits non courants',         'Autres produits non courants',                    'normal'),
-    ('reprises non courantes',               'Reprises non courantes ; transferts de charges',  'normal'),
-    ('total viii',                           'Total VIII',                                      'total'),
-    ('charges non courantes section',        'CHARGES NON COURANTES',                           'section'),
-    ('valeurs nettes amortissements',        "Valeurs nettes d'amortissement des immob. cédées",'normal'),
-    ('subventions accordees',                'Subventions accordées',                           'normal'),
-    ('autres charges non courantes',         'Autres charges non courantes',                    'normal'),
-    ('dotations non courantes',              'Dotations non courantes',                         'normal'),
-    ('total ix',                             'Total IX',                                        'total'),
-    ('resultat non courant',                 'RÉSULTAT NON COURANT (VIII-IX)',                  'result'),
-    ('resultat avant impots',                'RÉSULTAT AVANT IMPÔTS (VII+X)',                  'result'),
-    ('impots resultats',                     'IMPÔTS SUR LES RÉSULTATS',                       'normal'),
-    ('resultat net',                         'RÉSULTAT NET (XI-XII)',                           'result'),
-    ('total produits',                       'TOTAL DES PRODUITS (I+IV+VIII)',                  'total'),
-    ('total charges',                        'TOTAL DES CHARGES (II+V+IX+XII)',                 'total'),
-    ('resultat net total',                   'RÉSULTAT NET (Total produits - Total charges)',   'result'),
-]
+    for ci, (h, w) in enumerate([
+        ("N°",                     5),
+        ("DÉSIGNATION",            42),
+        ("PROPRES À\nL'EXERCICE",  18),
+        ("EXERCICES\nPRÉCÉDENTS",  18),
+        ("TOTAUX\nEXERCICE N",     18),
+        ("TOTAUX\nEXERCICE N-1",   18),
+    ], 1):
+        _c(ws, r, ci, h, bg=C_MED, fg=C_WHITE, bold=True, align='center', sz=9, wrap=True)
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[r].height = 30
+    ws.freeze_panes = f'A{r+1}'
+    r += 1
 
-# ══════════════════════════════════════════════════════════════════
-# NORMALISATION
-# ══════════════════════════════════════════════════════════════════
+    for ti, (key, label, typ) in enumerate(template):
+        bg, fg, bold = _row_colors(typ)
+        ws.row_dimensions[r].height = 15 if typ == 'normal' else 17
+        indent = 1 if typ == 'normal' else 0
+        num = _CPC_NUMS[ti] if ti < len(_CPC_NUMS) else ''
+        _c(ws, r, 1, num or None, bg=bg,
+           fg=fg if typ != 'normal' else C_MED,
+           bold=True, align='center', sz=8)
+        _c(ws, r, 2, label, bg=bg, fg=fg, bold=bold, align='left', sz=9, indent=indent)
+        vals = value_map.get(ti, [])
+        for ci in range(4):
+            v = vals[ci] if ci < len(vals) else None
+            _c(ws, r, ci+3, 0 if v is None else v,
+               bg=bg, fg=fg, bold=bold, align='right', sz=9, num_fmt=NUM_FMT)
+        r += 1
 
-def _norm(s: str) -> str:
-    s = unicodedata.normalize('NFD', str(s))
-    s = s.encode('ascii', 'ignore').decode().lower()
-    s = re.sub(r'^\s*[\*\.]+\s*', '', s)
-    s = re.sub(r'^(xvi|xiv|xiii|xii|xi|ix|viii|vii|vi|iv|v|iii|ii|i)\s*[\.\-\=]?\s*', '', s, flags=re.I)
-    s = re.sub(r'[^\w\s]', ' ', s)
-    s = re.sub(r'chiffres?', 'chiffre', s)
-    s = re.sub(r'reserves?', 'reserve', s)
-    s = re.sub(r'reprises?', 'reprise', s)
-    s = re.sub(r'provisions?', 'provision', s)
-    s = re.sub(r'subventions?', 'subvention', s)
-    return re.sub(r'\s+', ' ', s).strip()
+    r2 = r + 1
+    ws.merge_cells(start_row=r2, start_column=1, end_row=r2, end_column=6)
+    c = ws.cell(r2, 1)
+    c.value = "(1) Stock final − Stock initial.  (2) Achats revendus = Achats − Variation de stock."
+    c.font  = Font(name="Arial", italic=True, size=8, color="888888")
+    c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    return r - 6
 
-def _parse(s) -> float | None:
-    if s is None: return None
-    if isinstance(s, (int, float)): return float(s)
-    s = str(s).strip().replace('\xa0','').replace(' ','')
-    if not s or s in ['-','—']: return None
-    neg = s.startswith('-'); s = s.lstrip('-')
-    m = re.match(r'^(\d{1,3}(?:\.\d{3})*),(\d{2})$', s)
-    if m: s = m.group(1).replace('.','') + '.' + m.group(2)
-    elif re.match(r'^\d+,\d{2}$', s): s = s.replace(',','.')
-    elif re.match(r'^\d+(\.\d+)?$', s): pass
-    else: return None
-    try: return -float(s) if neg else float(s)
-    except: return None
+# ── Point d'entrée ────────────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════
-# MATCHING
-# ══════════════════════════════════════════════════════════════════
+def write(parsed: dict, output_path: str) -> dict:
+    info      = parsed['info']
+    templates = parsed['templates']
+    fmt       = parsed.get('format', '?')
 
-def match_label(label: str, template: list, used: set = None) -> int:
-    if used is None: used = set()
-    n = _norm(label)
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
 
-    _romain_seul = {
-        'xi':   'resultat avant impots',
-        'xii':  'impots resultats',
-        'xiii': 'resultat net',
-        'xiv':  'total produits',
-        'xv':   'total charges',
-        'xvi':  'resultat net total',
-    }
-    _label_brut = re.sub(r'[^a-zA-Z]', '', str(label).lower().strip())
-    if _label_brut in _romain_seul:
-        def _ff_early(key):
-            for i, (k, _, _) in enumerate(template):
-                if k == key:
-                    return i if i not in used else -1
-            return None
-        r = _ff_early(_romain_seul[_label_brut])
-        if r is not None: return r
+    _write_ident(wb, info)
+    n_a = _write_actif(wb,  info, templates['actif'],  parsed['actif'])
+    n_p = _write_passif(wb, info, templates['passif'], parsed['passif'])
+    n_c = _write_cpc(wb,    info, templates['cpc'],    parsed['cpc'])
 
-    if not n or len(n) < 2: return -1
+    wb.save(output_path)
+    total = n_a + n_p + n_c
+    logger.info(f"Excel {fmt} : {total} lignes ({n_a}a/{n_p}p/{n_c}c) → {output_path}")
 
-    syn_idx = lookup_in_template(label, template)
-    if syn_idx >= 0 and syn_idx not in used:
-        return syn_idx
-
-    def _first_free(key):
-        for i, (k, _, _) in enumerate(template):
-            if k == key:
-                return i if i not in used else -1
-        return None
-
-    def _exclusive(key):
-        r = _first_free(key)
-        return r
-
-    if 'total' in n:
-        _total_rules = [
-            ('general',                  ['total general actif', 'total general passif']),
-            ('i ii iii',                 ['total general actif', 'total general passif']),
-            ('l ii iii',                 ['total general actif', 'total general passif']),
-            ('iii',                      ['total iii actif', 'total iii passif']),
-            ('f g h i',                  ['total ii actif']),
-            ('f g h',                    ['total ii passif']),
-            ('a b c d e',                ['total i actif', 'total i passif']),
-            ('total des produits',       ['total produits']),
-            ('total des charges',        ['total charges']),
-            ('total viii',               ['total viii']),
-            ('total ix',                 ['total ix']),
-            ('total iv',                 ['total iv']),
-            ('total ii',                 ['total ii cpc', 'total ii actif', 'total ii passif']),
-            ('total v',                  ['total v']),
-            ('total i',                  ['total i cpc', 'total i actif', 'total i passif']),
-        ]
-        for pat, keys in _total_rules:
-            if pat in n:
-                for key in keys:
-                    r = _first_free(key)
-                    if r is not None:
-                        return r
-                break
-
-    if 'ecart' in n and 'conversion' in n:
-        if 'passif' not in n:
-            if 'circulant' in n or 'element' in n:
-                r = _first_free('ecarts conversion actif circulant')
-                if r is not None: return r
-            r = _first_free('ecarts conversion actif immobilise')
-            if r is not None: return r
-            return _first_free('ecarts conversion actif circulant')
-
-    if 'ecart' in n and 'conversion' in n and 'passif' in n:
-        if 'circulant' in n or 'element' in n:
-            return _first_free('ecarts conversion passif circulant')
-        else:
-            return _first_free('ecarts conversion passif financement')
-
-    if 'reprise' in n:
-        if 'non courant' in n:
-            return _first_free('reprises non courantes')
-        if 'financier' in n:
-            return _first_free('reprises financieres')
-        if 'exploitation' in n:
-            return _first_free('reprises exploitation')
-
-    if 'dotation' in n:
-        if 'non courant' in n:
-            return _first_free('dotations non courantes')
-        if 'financier' in n:
-            return _first_free('dotations financieres')
-        if 'exploitation' in n:
-            return _first_free('dotations exploitation')
-
-    if 'autres' in n and 'charge' in n:
-        if 'non courant' in n:
-            return _first_free('autres charges non courantes')
-        if 'financier' in n:
-            return _first_free('autres charges financieres')
-        if 'exploitation' in n:
-            return _first_free('autres charges exploitation')
-        if 'externe' in n:
-            return _first_free('autres charges externes')
-
-    if 'autre' in n and 'produit' in n:
-        if 'non courant' in n:
-            return _first_free('autres produits non courants')
-        if 'exploitation' in n:
-            return _first_free('autres produits exploitation')
-
-    if 'resultat' in n:
-        _results = [
-            ('resultat net xi',          'resultat net'),
-            ('resultat net total',       'resultat net total'),
-            ('resultat avant impot',     'resultat avant impots'),
-            ('resultat non courant',     'resultat non courant'),
-            ('resultat courant',         'resultat courant'),
-            ('resultat financier',       'resultat financier'),
-            ('resultat exploitation',    'resultat exploitation'),
-        ]
-        for pat, key in _results:
-            if n.startswith(pat) or pat in n:
-                return _first_free(key)
-
-    words_label = set(w for w in n.split() if len(w) > 2)
-    if not words_label: return -1
-
-    scores = []
-    for i, (key, display, typ) in enumerate(template):
-        if i in used: continue
-        n_key = _norm(key)
-        words_key = set(w for w in n_key.split() if len(w) > 2)
-        if not words_key: continue
-
-        common = len(words_label & words_key)
-        union  = len(words_label | words_key)
-        score  = common / union if union > 0 else 0
-
-        if n.startswith(n_key[:8]) or n_key.startswith(n[:8]):
-            score = min(score + 0.2, 1.0)
-
-        if score >= 0.35:
-            scores.append((score, i))
-
-    if not scores: return -1
-    scores.sort(reverse=True)
-    return scores[0][1]
-
-# ══════════════════════════════════════════════════════════════════
-# EXTRACTION
-# ══════════════════════════════════════════════════════════════════
-
-def _is_rotated(v) -> bool:
-    if not v: return False
-    parts = [p.strip() for p in str(v).split('\n') if p.strip()]
-    return len(parts) >= 3 and all(len(p) <= 2 and p.replace('.','').isalpha() for p in parts)
-
-def _is_index_row(row) -> bool:
-    vals = [str(c).strip() for c in (row or []) if c is not None]
-    if len(vals) < 2: return False
-    try:
-        nums = [int(v) for v in vals]
-        return nums == list(range(len(nums)))
-    except: return False
-
-def _has_fused(table) -> bool:
-    count = 0
-    for row in (table or []):
-        for cell in (row or []):
-            if cell and '\n' in str(cell):
-                parts = [x for x in str(cell).split('\n') if _parse(x) is not None]
-                if len(parts) > 1: count += 1
-    return count >= 3
-
-def _detect_val_cols(table) -> list:
-    hits = {}
-    for row in (table or [])[2:]:
-        if not row: continue
-        for ci, c in enumerate(row):
-            if not c: continue
-            s = str(c).strip().replace('\xa0','').replace(' ','')
-            if re.match(r'^-?\d{1,3}(\.\d{3})*,\d{2}$', s) or re.match(r'^-?\d+,\d{2}$', s):
-                hits[ci+1] = hits.get(ci+1, 0) + 1
-    return sorted(k for k, v in hits.items() if v >= 2)
-
-# ── NOUVEAU : détection CPC DGI 6 colonnes ───────────────────────
-def _is_cpc_6col(table) -> bool:
-    """
-    Détecte une table CPC DGI à 6 colonnes :
-      col0=Nature | col1=Label | col2=Propres | col3=Exerc.Préc | col4=Total N | col5=Total N-1
-    Ce format spécifique provoque un décalage si on utilise _detect_val_cols()
-    car la col2 (Propres) est souvent vide sur les lignes de résultats.
-    Détection : header col0 contient 'nature'.
-    """
-    if not table or not table[0] or len(table[0]) != 6:
-        return False
-    header = str(table[0][0] or '').lower()
-    return 'nature' in header
-# ─────────────────────────────────────────────────────────────────
-
-def _xy_rows(page) -> list:
-    """Extraction X/Y pour pages avec cellules fusionnées."""
-    words = page.extract_words(x_tolerance=3, y_tolerance=3)
-    if not words: return []
-
-    def is_num(t):
-        return (bool(re.match(r'^-?\d+$', t.replace(',','').replace('.','')))
-                and len(t.replace(',','').replace('.','')) >= 1)
-
-    num_ws = [w for w in words if is_num(w['text']) and w['x0'] > 100]
-    if not num_ws: return []
-    thresh = min(w['x0'] for w in num_ws) - 5
-
-    lines = defaultdict(list)
-    for w in words:
-        lines[round(w['top'] / 3) * 3].append(w)
-
-    result = []
-    for y in sorted(lines):
-        row = sorted(lines[y], key=lambda w: w['x0'])
-        lw = [w for w in row if w['x0'] < thresh]
-        nw = [w for w in row if w['x0'] >= thresh and is_num(w['text'])]
-
-        filt = [w for w in lw if not (len(w['text'])<=1
-                                       and re.match(r'^[A-Z.]$', w['text'])
-                                       and w['x0'] < 50)]
-        label = ''
-        if filt:
-            label = filt[0]['text']
-            for i in range(1, len(filt)):
-                gap = filt[i]['x0'] - filt[i-1]['x1']
-                label += filt[i]['text'] if gap <= 1 else ' ' + filt[i]['text']
-            label = re.sub(r' +', ' ', label).strip()
-
-        vals = []
-        if nw:
-            grp = [nw[0]]
-            for w in nw[1:]:
-                if w['x0'] - grp[-1]['x1'] < 18: grp.append(w)
-                else:
-                    v = _parse(''.join(x['text'] for x in grp))
-                    if v is not None: vals.append(v)
-                    grp = [w]
-            v = _parse(''.join(x['text'] for x in grp))
-            if v is not None: vals.append(v)
-
-        if label and vals:
-            result.append((label, vals))
-        elif label and not vals:
-            result.append((label, []))
-        elif not label and vals and result:
-            last_label, last_vals = result[-1]
-            if not last_vals:
-                result[-1] = (last_label, vals)
-
-    return [(l, v) for l, v in result if v]
-
-def _extract_section(pdf, page_indices: list, is_actif: bool = False) -> list[tuple[str, list]]:
-    """
-    Extrait les paires (label, [valeurs]) d'une section.
-    Choisit automatiquement X/Y ou extract_tables().
-    """
-    all_rows = []
-    for idx in page_indices:
-        if idx >= len(pdf.pages): continue
-        page = pdf.pages[idx]
-        tables = page.extract_tables()
-        good = [t for t in tables
-                if t and len(t) >= 3 and t[0] and len(t[0]) >= 2
-                and sum(1 for r in t[1:] if any(c for c in r if c)) >= 2]
-        if not good: continue
-
-        if any(_has_fused(t) for t in good):
-            rows = _xy_rows(page)
-        else:
-            rows = []
-            for t in good:
-                # ── CPC DGI 6 colonnes : Nature | Label | Prop. | Préc. | TotalN | TotalN-1
-                if _is_cpc_6col(t):
-                    for row in t[1:]:  # skip header
-                        if not row: continue
-                        col0  = str(row[0] or '').strip().replace('\n', ' ')
-                        col1  = str(row[1] or '').strip().replace('\n', ' ')
-                        label = col1 if col1 else col0
-                        label = re.sub(r'^\*\s*', '', label).strip()
-                        if not label or len(label) < 2: continue
-                        if _parse(label) is not None: continue
-                        v = [
-                            _parse(row[2]) if len(row) > 2 else None,
-                            _parse(row[3]) if len(row) > 3 else None,
-                            _parse(row[4]) if len(row) > 4 else None,
-                            _parse(row[5]) if len(row) > 5 else None,
-                        ]
-                        if any(x is not None for x in v):
-                            rows.append((label, v))
-                    continue  # table suivante, bypass code générique
-                # ─────────────────────────────────────────────────
-
-                val_cols = _detect_val_cols(t)
-                for row in t:
-                    if not row or _is_index_row(row): continue
-                    if len(row) < 2: continue
-                    col1 = str(row[1]).strip().replace('\n',' ') if len(row)>1 and row[1] else ''
-                    if _ROMAIN_RE.match(col1.strip()):
-                        label = str(row[2]).strip().replace('\n',' ') if len(row)>2 and row[2] else ''
-                    else:
-                        label = col1
-                    if _is_rotated(label): label = ''
-                    if not label or len(label) < 2: continue
-                    if _parse(label) is not None: continue
-
-                    def gv(col):
-                        if col and len(row) >= col: return _parse(row[col-1])
-                        return None
-                    nv = len(val_cols)
-                    if is_actif and nv == 3:
-                        gap = val_cols[1] - val_cols[0]
-                        if gap > 1:
-                            vals = [gv(val_cols[0]), None, gv(val_cols[1]), gv(val_cols[2])]
-                        else:
-                            vals = [gv(val_cols[0]), gv(val_cols[1]), gv(val_cols[2]), None]
-                    else:
-                        vals = [gv(val_cols[i]) for i in range(min(nv, 4))]
-                    if vals or label:
-                        rows.append((label, vals))
-
-        all_rows.extend(rows)
-    return all_rows
-
-def _build_value_map(rows: list, template: list) -> dict:
-    result = {}
-    used = set()
-
-    for label, vals in rows:
-        idx = match_label(label, template, used=used)
-        if idx < 0: continue
-        if idx in result: continue
-        result[idx] = vals
-        used.add(idx)
-
-    return result
-
-# ══════════════════════════════════════════════════════════════════
-# INFOS
-# ══════════════════════════════════════════════════════════════════
-
-def extract_info(pdf) -> dict:
-    info = {}
-    for i in range(min(2, len(pdf.pages))):
-        text = pdf.pages[i].extract_text() or ''
-        for key, pat in [
-            ('raison_sociale',      r'[Rr]aison\s+[Ss]ociale\s*:?\s*([A-Z][^\n]{3,60})'),
-            ('identifiant_fiscal',  r'[Ii]dentifiant\s+[Ff]iscal\s*:?\s*(\d+)'),
-            ('taxe_professionnelle',r'[Tt]axe\s+[Pp]rof\w*\.?\s*:?\s*([\d\s]+)'),
-            ('adresse',             r'[Aa]dresse\s*:?\s*([^\n]{5,60})'),
-        ]:
-            if key not in info:
-                m = re.search(pat, text, re.IGNORECASE)
-                if m: info[key] = m.group(1).strip()
-
-        if 'exercice' not in info:
-            for pat in [
-                r'[Ee]xercice\s+du\s+(\d{2}/\d{2}/\d{4})\s+au\s+(\d{2}/\d{2}/\d{4})',
-                r'(\d{2}/\d{2}/\d{4})\s+au\s+(\d{2}/\d{2}/\d{4})',
-            ]:
-                m = re.search(pat, text)
-                if m:
-                    info['exercice']     = f"Du {m.group(1)} au {m.group(2)}"
-                    info['exercice_fin'] = m.group(2)
-                    break
-
-    for k in ('raison_sociale','identifiant_fiscal','taxe_professionnelle',
-              'adresse','exercice','exercice_fin'):
-        info.setdefault(k, '')
-    return info
-
-# ══════════════════════════════════════════════════════════════════
-# POINT D'ENTRÉE
-# ══════════════════════════════════════════════════════════════════
-
-def parse(pdf_path: str) -> dict:
-    pdf = pdfplumber.open(pdf_path)
-    info = extract_info(pdf)
-
-    logger.info(f"DGI parser : {info.get('raison_sociale','?')} | {info.get('exercice','?')}")
-
-    actif_rows  = _extract_section(pdf, [1, 2], is_actif=True)
-    passif_rows = _extract_section(pdf, [3])
-    cpc_rows    = _extract_section(pdf, [4, 5, 6])
-    pdf.close()
-
-    actif_map  = _build_value_map(actif_rows,  ACTIF)
-    passif_map = _build_value_map(passif_rows, PASSIF)
-    cpc_map    = _build_value_map(cpc_rows,    CPC)
-
-    logger.info(f"  DGI Actif  : {len(actif_map)}/{len(ACTIF)} postes")
-    logger.info(f"  DGI Passif : {len(passif_map)}/{len(PASSIF)} postes")
-    logger.info(f"  DGI CPC    : {len(cpc_map)}/{len(CPC)} postes")
-
-    return {
-        'info':   info,
-        'actif':  actif_map,
-        'passif': passif_map,
-        'cpc':    cpc_map,
-        'format': 'DGI',
-        'templates': {'actif': ACTIF, 'passif': PASSIF, 'cpc': CPC},
-    }
+    return {'rows': total, 'actif': n_a, 'passif': n_p, 'cpc': n_c, 'format': fmt}
