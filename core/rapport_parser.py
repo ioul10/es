@@ -260,36 +260,38 @@ def _find_zone_boundary(page) -> float:
 # ══════════════════════════════════════════════════════════════════
 
 def _extract_section(pdf, page_indices: list,
-                     section: str,           # 'actif', 'passif', 'cpc'
+                     section: str,
+                     zone_pct: tuple = (0, 100),
                      ) -> list[tuple[str, list]]:
     """
     Extrait les lignes d'une section depuis les pages indiquées.
-    Détecte automatiquement si la page est rotative ou normale.
+    zone_pct : (pct_left, pct_right) en % de la largeur — définit la zone horizontale.
     """
-    n_val = {'actif': 4, 'passif': 2, 'cpc': 4}[section]
+    n_val    = {'actif': 4, 'passif': 2, 'cpc': 4}[section]
     is_actif = section == 'actif'
     all_rows = []
 
     for idx in page_indices:
         if idx >= len(pdf.pages): continue
-        page = pdf.pages[idx]
+        page   = pdf.pages[idx]
+        pct_l, pct_r = zone_pct
+        x_min  = pct_l / 100 * page.width
+        x_max  = pct_r / 100 * page.width
 
         if _is_rotated_page(page):
-            # Page rotative → extraction par zones x
-            boundary = _find_zone_boundary(page)
-
-            if section == 'actif':
-                rows = _extract_rotated_zone(page, 0, boundary, n_val)
-            elif section == 'passif':
-                rows = _extract_rotated_zone(page, boundary, page.width, n_val)
-            else:  # cpc — toute la largeur
-                rows = _extract_rotated_zone(page, 0, page.width, n_val)
+            # Page rotative → filtrage par zone x
+            rows = _extract_rotated_zone(page, x_min, x_max, n_val)
         else:
-            # Page normale → extraction via tables
-            if _has_fused(page.extract_tables()[0] if page.extract_tables() else []):
-                rows = _xy_rows(page)
+            # Page normale → crop pdfplumber puis extraction
+            if pct_l > 0 or pct_r < 100:
+                cropped = page.crop((x_min, 0, x_max, page.height))
             else:
-                rows = _extract_normal(page, is_actif=is_actif)
+                cropped = page
+            tables = cropped.extract_tables()
+            if tables and _has_fused(tables[0]):
+                rows = _xy_rows(cropped)
+            else:
+                rows = _extract_normal(cropped, is_actif=is_actif)
 
         all_rows.extend(rows)
 
@@ -301,10 +303,15 @@ def _extract_section(pdf, page_indices: list,
 # ══════════════════════════════════════════════════════════════════
 
 def parse(pdf_path: str, pages_actif: str, pages_passif: str,
-          pages_cpc: str, info: dict) -> dict:
+          pages_cpc: str, info: dict,
+          zone_actif: tuple = (0, 100),
+          zone_passif: tuple = (0, 100),
+          zone_cpc: tuple = (0, 100)) -> dict:
     """
     Parse un rapport financier libre.
-    Retourne un dict compatible avec excel_writer.write().
+    
+    zone_* : tuple (pct_left, pct_right) en % de la largeur de page.
+             Ex: (0, 50) = moitié gauche, (50, 100) = moitié droite.
     """
     pdf = pdfplumber.open(pdf_path)
     total_pages = len(pdf.pages)
@@ -313,9 +320,9 @@ def parse(pdf_path: str, pages_actif: str, pages_passif: str,
     idx_passif = _parse_pages_input(pages_passif)
     idx_cpc    = _parse_pages_input(pages_cpc)
 
-    actif_rows  = _extract_section(pdf, idx_actif,  'actif')
-    passif_rows = _extract_section(pdf, idx_passif, 'passif')
-    cpc_rows    = _extract_section(pdf, idx_cpc,    'cpc')
+    actif_rows  = _extract_section(pdf, idx_actif,  'actif',  zone_pct=zone_actif)
+    passif_rows = _extract_section(pdf, idx_passif, 'passif', zone_pct=zone_passif)
+    cpc_rows    = _extract_section(pdf, idx_cpc,    'cpc',    zone_pct=zone_cpc)
     pdf.close()
 
     actif_map  = _build_value_map(actif_rows,  ACTIF)
