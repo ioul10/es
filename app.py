@@ -313,31 +313,33 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
     # MODE RAPPORT FINANCIER
     # ══════════════════════════════════════════════════════════════
     """
-    Mode Rapport Financier — à intégrer dans app.py (bloc `else` du mode rapport)
-    Remplace le bloc `else: # MODE RAPPORT FINANCIER` existant.
+    Mode Rapport Financier v2 — avec détection automatique des tableaux
+    Remplace le bloc `else: # MODE RAPPORT FINANCIER` dans app.py
     """
 
     # ══════════════════════════════════════════════════════════════════
     # MODE RAPPORT FINANCIER
     # ══════════════════════════════════════════════════════════════════
 
+    import io, os, tempfile
+    import pdfplumber
+    from PIL import Image, ImageDraw
+
     st.markdown("""<div class="rapport-box">
     <span class="step-badge-rapport">Rapport financier</span>
     <h3>Conversion d'un rapport financier libre</h3>
-    <p>
-    Uploadez votre rapport, indiquez les pages et les zones visuellement,
-    puis générez l'Excel MCN standardisé.
-    </p>
+    <p>Uploadez votre rapport — les tableaux sont détectés automatiquement.
+    Ajustez les zones si nécessaire puis générez l'Excel MCN.</p>
     </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
 
     # ── ÉTAPE 1 : Upload ─────────────────────────────────────────────
     st.markdown("### 📂 Étape 1 — Importer le rapport PDF")
+
     uploaded_r = st.file_uploader(
         "Rapport financier annuel (PDF)",
-        type=["pdf"],
-        key="upload_rapport"
+        type=["pdf"], key="upload_rapport"
     )
 
     if not uploaded_r:
@@ -345,23 +347,18 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
     border:2px dashed #70AD47;border-radius:12px;background:#f0f7f0;">
     <div style="font-size:3rem;">📑</div>
     <h3 style="color:#375623;">Glissez votre rapport PDF ici</h3>
-    <p>Rapport financier annuel · Pages libres</p>
+    <p>Rapport financier annuel · Détection automatique des tableaux</p>
     </div>""", unsafe_allow_html=True)
 
     else:
-        # Sauvegarder le PDF en session
-        if 'pdf_bytes_r' not in st.session_state or st.session_state.get('pdf_name_r') != uploaded_r.name:
+        # Sauvegarder PDF en session
+        if (st.session_state.get('pdf_name_r') != uploaded_r.name):
             st.session_state['pdf_bytes_r'] = uploaded_r.getbuffer().tobytes()
             st.session_state['pdf_name_r']  = uploaded_r.name
-            # Reset parsing si nouveau fichier
-            for k in ['parsed_rapport', 'pdf_path_r']:
+            for k in ['parsed_rapport', 'detected_tables', 'zone_config']:
                 st.session_state.pop(k, None)
 
-        import tempfile, os, io
-        import pdfplumber
-        from PIL import Image
-
-        # Écrire le PDF dans un fichier temp permanent (pour pdfplumber)
+        # Écrire dans fichier temp
         if 'pdf_path_r' not in st.session_state:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
             tmp.write(st.session_state['pdf_bytes_r'])
@@ -374,7 +371,7 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
             with pdfplumber.open(pdf_path_r) as _pdf:
                 total_pages = len(_pdf.pages)
                 page_dims   = [(p.width, p.height) for p in _pdf.pages]
-            st.success(f"✅ PDF chargé — **{total_pages} page{'s' if total_pages > 1 else ''}** détectée{'s' if total_pages > 1 else ''}")
+            st.success(f"✅ PDF chargé — **{total_pages} page{'s' if total_pages>1 else ''}**")
         except Exception as e:
             st.error(f"Erreur lecture PDF : {e}")
             total_pages = 0
@@ -384,189 +381,234 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
 
             # ── ÉTAPE 2 : Identification ──────────────────────────────
             st.markdown("### ✏️ Étape 2 — Informations d'identification")
-
             col_r1, col_r2 = st.columns(2)
             with col_r1:
-                r_raison  = st.text_input("Raison sociale *", placeholder="Ex : LABELVIE SA", key="r_raison")
-                r_if      = st.text_input("Identifiant fiscal", placeholder="Ex : 4510887", key="r_if")
-                r_taxe    = st.text_input("Taxe professionnelle", placeholder="Ex : 25725940", key="r_taxe")
+                r_raison  = st.text_input("Raison sociale *",    placeholder="Ex : LABELVIE SA",    key="r_raison")
+                r_if      = st.text_input("Identifiant fiscal",  placeholder="Ex : 4510887",         key="r_if")
+                r_taxe    = st.text_input("Taxe professionnelle",placeholder="Ex : 25725940",        key="r_taxe")
             with col_r2:
-                r_date    = st.text_input("Date de bilan *", placeholder="Ex : 31/12/2025", key="r_date")
-                r_centre  = st.text_input("Centre d'affaires *", placeholder="Ex : Casa Finance", key="r_centre")
+                r_date    = st.text_input("Date de bilan *",     placeholder="Ex : 31/12/2025",      key="r_date")
+                r_centre  = st.text_input("Centre d'affaires *", placeholder="Ex : Casa Finance",    key="r_centre")
                 r_secteur = st.selectbox("Macro-secteur *",
                     options=["— Sélectionner —","Manufactures","Services","Commerce","BTP","Holding"],
                     key="r_secteur")
 
             st.markdown("---")
 
-            # ── ÉTAPE 3 : Pages + Zones visuelles ────────────────────
+            # ── ÉTAPE 3 : Détection + Zones ──────────────────────────
             st.markdown("### 🗺️ Étape 3 — Localiser les tableaux")
-            st.caption(
-                "Pour chaque section, indiquez la page et la zone horizontale "
-                "en glissant les curseurs. **0% = bord gauche · 100% = bord droit.** "
-                "Si le tableau occupe toute la largeur, laissez 0%→100%."
+
+            # Bouton de détection automatique
+            col_det1, col_det2 = st.columns([1, 2])
+            with col_det1:
+                detect_clicked = st.button(
+                    "🔍 Détecter automatiquement",
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_detect"
+                )
+            with col_det2:
+                st.caption(
+                    "Cliquez pour détecter les tableaux automatiquement. "
+                    "Les zones seront pré-remplies — ajustez si nécessaire."
+                )
+
+            if detect_clicked:
+                with st.spinner("Analyse du PDF en cours..."):
+                    try:
+                        from core.table_detector import detect_tables, summarize
+                        tables   = detect_tables(pdf_path_r)
+                        summary  = summarize(tables)
+                        st.session_state['detected_tables'] = tables
+                        st.session_state['detected_summary'] = summary
+
+                        # Construire zone_config depuis le résumé
+                        zc = {}
+                        defaults = {'actif': (0,50), 'passif': (50,100), 'cpc': (0,100)}
+                        pages_default = {'actif': '1', 'passif': '1' if total_pages==1 else '2',
+                                         'cpc': '2' if total_pages >= 2 else '1'}
+                        for sec in ['actif','passif','cpc']:
+                            if sec in summary:
+                                t = summary[sec]
+                                zc[sec] = {
+                                    'pages':    str(t['page']),
+                                    'pct_left': t['pct_x0'],
+                                    'pct_right':t['pct_x1'],
+                                    'detected': True,
+                                }
+                            else:
+                                zc[sec] = {
+                                    'pages':    pages_default[sec],
+                                    'pct_left': defaults[sec][0],
+                                    'pct_right':defaults[sec][1],
+                                    'detected': False,
+                                }
+                        st.session_state['zone_config'] = zc
+
+                        # Afficher résultat détection
+                        n_found = len([s for s in ['actif','passif','cpc'] if s in summary])
+                        if n_found == 3:
+                            st.markdown(f'<div class="ok">✅ <strong>3/3 tableaux détectés</strong> — Actif, Passif et CPC localisés automatiquement.</div>',
+                                        unsafe_allow_html=True)
+                        elif n_found > 0:
+                            found = [s for s in ['actif','passif','cpc'] if s in summary]
+                            missing = [s for s in ['actif','passif','cpc'] if s not in summary]
+                            st.markdown(
+                                f'<div class="warn">⚠️ <strong>{n_found}/3 détectés</strong> — '
+                                f'Trouvés : {", ".join(found)}. '
+                                f'Non trouvés : {", ".join(missing)} — ajustez manuellement.</div>',
+                                unsafe_allow_html=True)
+                        else:
+                            st.markdown('<div class="er">❌ Aucun tableau détecté automatiquement. Renseignez les zones manuellement.</div>',
+                                        unsafe_allow_html=True)
+                    except Exception as e:
+                        st.error(f"Erreur détection : {e}")
+                        import traceback; st.code(traceback.format_exc())
+
+            # Initialiser zone_config si pas encore fait
+            if 'zone_config' not in st.session_state:
+                st.session_state['zone_config'] = {
+                    'actif':  {'pages': '1',                                    'pct_left': 0,  'pct_right': 100, 'detected': False},
+                    'passif': {'pages': '1' if total_pages==1 else '2',         'pct_left': 0,  'pct_right': 100, 'detected': False},
+                    'cpc':    {'pages': '2' if total_pages >= 2 else '1',       'pct_left': 0,  'pct_right': 100, 'detected': False},
+                }
+
+            zc = st.session_state['zone_config']
+
+            # ── Aperçu + sliders ──────────────────────────────────────
+            st.markdown("#### Ajuster les zones")
+            st.caption("Les curseurs définissent la zone horizontale de chaque tableau (0% = bord gauche, 100% = bord droit)")
+
+            # Sélecteur page aperçu
+            preview_page = st.selectbox(
+                "📄 Page à visualiser",
+                options=list(range(1, total_pages + 1)),
+                format_func=lambda x: f"Page {x}",
+                key="preview_page"
             )
 
-            # Sélecteur de page pour l'aperçu
-            col_prev, col_info = st.columns([2, 1])
-            with col_prev:
-                preview_page = st.selectbox(
-                    "📄 Aperçu de la page",
-                    options=list(range(1, total_pages + 1)),
-                    format_func=lambda x: f"Page {x}",
-                    key="preview_page"
-                )
-            with col_info:
-                w, h = page_dims[preview_page - 1]
-                st.markdown(f"""<div style="background:#f0f7f0;border-radius:8px;
-    padding:.8rem;margin-top:1.6rem;font-size:.85rem;color:#375623;">
-    📐 <strong>{w:.0f} × {h:.0f} pt</strong><br>
-    🔢 Page {preview_page} / {total_pages}
+            # Colonnes : sliders à gauche, aperçu à droite
+            col_sliders, col_preview = st.columns([1, 1])
+
+            SECTION_META = {
+                'actif':  ('🟦 Bilan Actif',  '#2E75B6', (46, 117, 182)),
+                'passif': ('🟩 Bilan Passif', '#70AD47', (112, 173, 71)),
+                'cpc':    ('🟧 CPC',          '#ED7D31', (237, 125, 49)),
+            }
+
+            new_zc = {}
+            with col_sliders:
+                for sec in ['actif', 'passif', 'cpc']:
+                    label, color_hex, color_rgb = SECTION_META[sec]
+                    cfg = zc[sec]
+
+                    detected_badge = (
+                        ' <span style="background:#E2EFDA;color:#375623;'
+                        'border-radius:4px;padding:1px 6px;font-size:.72rem;">✅ auto</span>'
+                        if cfg.get('detected') else ''
+                    )
+                    st.markdown(
+                        f'<div style="font-weight:bold;color:{color_hex};margin-bottom:4px;">'
+                        f'{label}{detected_badge}</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    p_col, z_col = st.columns([1, 2])
+                    with p_col:
+                        pages_val = st.text_input(
+                            "Pages", value=cfg['pages'],
+                            placeholder="ex: 1 ou 1,2",
+                            key=f"pages_{sec}",
+                            label_visibility="collapsed"
+                        )
+                        st.caption("Pages")
+
+                    with z_col:
+                        zone_pct = st.slider(
+                            "Zone", min_value=0, max_value=100,
+                            value=(cfg['pct_left'], cfg['pct_right']),
+                            step=5, key=f"zone_{sec}",
+                            label_visibility="collapsed"
+                        )
+
+                    # Barre colorée
+                    pct_l, pct_r = zone_pct
+                    st.markdown(f"""
+    <div style="background:#e8e8e8;border-radius:3px;height:8px;margin:0 0 12px;">
+      <div style="background:{color_hex};border-radius:3px;height:8px;
+        margin-left:{pct_l}%;width:{max(pct_r-pct_l,1)}%;"></div>
     </div>""", unsafe_allow_html=True)
 
-            # Génération aperçu
+                    new_zc[sec] = {
+                        'pages':     pages_val,
+                        'pct_left':  pct_l,
+                        'pct_right': pct_r,
+                        'detected':  cfg.get('detected', False),
+                    }
+
+            # Sauvegarder les nouvelles valeurs
+            st.session_state['zone_config'] = new_zc
+
+            # ── Aperçu avec overlay ───────────────────────────────────
             @st.cache_data(show_spinner=False)
-            def get_page_preview(pdf_path: str, page_idx: int, resolution: int = 80) -> bytes:
+            def get_preview(pdf_path: str, page_idx: int) -> bytes:
                 with pdfplumber.open(pdf_path) as pdf:
-                    img = pdf.pages[page_idx].to_image(resolution=resolution)
+                    img = pdf.pages[page_idx].to_image(resolution=90)
                     buf = io.BytesIO()
                     img.save(buf, format="PNG")
                     return buf.getvalue()
 
-            with st.spinner("Génération de l'aperçu..."):
-                preview_bytes = get_page_preview(pdf_path_r, preview_page - 1)
+            with col_preview:
+                prev_bytes = get_preview(pdf_path_r, preview_page - 1)
+                img_pil    = Image.open(io.BytesIO(prev_bytes)).convert("RGBA")
+                overlay    = Image.new("RGBA", img_pil.size, (0,0,0,0))
+                draw       = ImageDraw.Draw(overlay)
+                iW, iH    = img_pil.size
 
-            # Afficher l'aperçu avec les zones colorées
-            col_img, col_zones = st.columns([1, 1])
+                for sec in ['actif', 'passif', 'cpc']:
+                    cfg = new_zc[sec]
+                    _, _, rgb = SECTION_META[sec]
 
-            with col_img:
-                st.image(preview_bytes, caption=f"Page {preview_page}", use_column_width=True)
+                    # Vérifier si cette section est sur la page affichée
+                    try:
+                        from core.rapport_parser import _parse_pages_input
+                        pages_list = _parse_pages_input(cfg['pages'])
+                    except Exception:
+                        import re
+                        pages_list = [int(p)-1 for p in re.split(r'[,;]', cfg['pages'])
+                                      if p.strip().isdigit()]
 
-            with col_zones:
-                st.markdown("#### 📊 Définir les zones")
+                    if (preview_page - 1) not in pages_list:
+                        continue
 
-                SECTIONS = [
-                    ("actif",  "🟦 Bilan Actif",  "#2E75B6"),
-                    ("passif", "🟩 Bilan Passif",  "#70AD47"),
-                    ("cpc",    "🟧 CPC",           "#ED7D31"),
-                ]
+                    x0 = int(cfg['pct_left']  / 100 * iW)
+                    x1 = int(cfg['pct_right'] / 100 * iW)
+                    if x1 <= x0: continue
 
-                zone_config = {}
-                for key, label, color in SECTIONS:
-                    st.markdown(f"**{label}**")
-                    p_col, _ = st.columns([1, 1])
-                    with p_col:
-                        pages_val = st.text_input(
-                            f"Pages",
-                            value="1" if total_pages == 1 else "",
-                            placeholder="Ex: 1 ou 1,2",
-                            key=f"pages_{key}",
-                            label_visibility="collapsed"
-                        )
-                        st.caption(f"Pages pour {label.split()[1]}")
+                    draw.rectangle([x0, 0, x1, iH],
+                                   fill=(*rgb, 50),
+                                   outline=(*rgb, 200))
+                    draw.rectangle([x0, 0, x1, 22],
+                                   fill=(*rgb, 180))
+                    lbl_map = {'actif':'ACTIF','passif':'PASSIF','cpc':'CPC'}
+                    draw.text((x0+4, 4), lbl_map[sec], fill=(255,255,255,255))
 
-                    zone_pct = st.slider(
-                        f"Zone horizontale",
-                        min_value=0, max_value=100,
-                        value=(0, 100),
-                        step=5,
-                        key=f"zone_{key}",
-                        label_visibility="collapsed",
-                        help=f"Glisser pour délimiter la zone du tableau {label}"
-                    )
-
-                    # Afficher la zone choisie
-                    pct_left, pct_right = zone_pct
-                    bar_html = f"""
-    <div style="background:#e0e0e0;border-radius:4px;height:12px;margin:2px 0 8px;">
-      <div style="background:{color};border-radius:4px;height:12px;
-        margin-left:{pct_left}%;width:{pct_right-pct_left}%;"></div>
-    </div>
-    <div style="font-size:.75rem;color:#666;margin-bottom:12px;">
-      Zone : {pct_left}% → {pct_right}%
-    </div>"""
-                    st.markdown(bar_html, unsafe_allow_html=True)
-
-                    zone_config[key] = {
-                        'pages': pages_val,
-                        'pct_left':  pct_left,
-                        'pct_right': pct_right,
-                    }
-
-            # Overlay visuel des 3 zones sur l'aperçu
-            st.markdown("#### 🎨 Aperçu des zones sélectionnées")
-
-            # Recréer l'image avec overlay des zones
-            @st.cache_data(show_spinner=False)
-            def get_page_preview_hd(pdf_path: str, page_idx: int) -> tuple:
-                with pdfplumber.open(pdf_path) as pdf:
-                    page = pdf.pages[page_idx]
-                    img = page.to_image(resolution=100)
-                    buf = io.BytesIO()
-                    img.save(buf, format="PNG")
-                    return buf.getvalue(), page.width, page.height
-
-            img_bytes_hd, page_w, page_h = get_page_preview_hd(pdf_path_r, preview_page - 1)
-
-            # Dessiner les zones avec PIL
-            from PIL import Image, ImageDraw, ImageFont
-            img_pil = Image.open(io.BytesIO(img_bytes_hd)).convert("RGBA")
-            overlay = Image.new("RGBA", img_pil.size, (0, 0, 0, 0))
-            draw    = ImageDraw.Draw(overlay)
-
-            COLORS_RGBA = {
-                'actif':  (46,  117, 182, 60),
-                'passif': (112, 173,  71, 60),
-                'cpc':    (237, 125,  49, 60),
-            }
-            COLORS_BORDER = {
-                'actif':  (46,  117, 182, 200),
-                'passif': (112, 173,  71, 200),
-                'cpc':    (237, 125,  49, 200),
-            }
-
-            img_w, img_h = img_pil.size
-
-            for key, cfg in zone_config.items():
-                # Convertir % → pixels image
-                x0_px = int(cfg['pct_left']  / 100 * img_w)
-                x1_px = int(cfg['pct_right'] / 100 * img_w)
-                if x1_px > x0_px:
-                    draw.rectangle([x0_px, 0, x1_px, img_h],
-                                   fill=COLORS_RGBA[key])
-                    draw.rectangle([x0_px, 0, x1_px, img_h],
-                                   outline=COLORS_BORDER[key], width=3)
-                    # Label
-                    label_map = {'actif': 'ACTIF', 'passif': 'PASSIF', 'cpc': 'CPC'}
-                    draw.text((x0_px + 5, 10), label_map[key],
-                              fill=COLORS_BORDER[key])
-
-            composite = Image.alpha_composite(img_pil, overlay).convert("RGB")
-            buf_out = io.BytesIO()
-            composite.save(buf_out, format="PNG")
-
-            col_ov1, col_ov2, col_ov3 = st.columns([1, 2, 1])
-            with col_ov2:
+                composite = Image.alpha_composite(img_pil, overlay).convert("RGB")
+                buf_out   = io.BytesIO()
+                composite.save(buf_out, format="PNG")
                 st.image(buf_out.getvalue(),
-                         caption="Zones définies — Bleu=Actif · Vert=Passif · Orange=CPC",
+                         caption=f"Page {preview_page} — zones colorées",
                          use_column_width=True)
-
-            # Légende
-            st.markdown("""
-    <div style="display:flex;gap:1.5rem;margin:.5rem 0;">
-    <span style="color:#2E75B6;font-weight:bold;">🟦 Actif</span>
-    <span style="color:#70AD47;font-weight:bold;">🟩 Passif</span>
-    <span style="color:#ED7D31;font-weight:bold;">🟧 CPC</span>
-    </div>""", unsafe_allow_html=True)
 
             st.markdown("---")
 
             # ── ÉTAPE 4 : Analyser ────────────────────────────────────
             st.markdown("### 🔍 Étape 4 — Analyser")
 
-            pages_ok = all(zone_config[k]['pages'].strip() for k in ['actif','passif','cpc'])
+            pages_ok = all(new_zc[k]['pages'].strip() for k in ['actif','passif','cpc'])
+
             if not pages_ok:
-                st.markdown('<div class="warn">⚠️ Renseignez les pages pour les 3 sections avant d\'analyser.</div>',
+                st.markdown('<div class="warn">⚠️ Renseignez les pages pour les 3 sections.</div>',
                             unsafe_allow_html=True)
 
             if st.button("🔍 Analyser le rapport", type="primary",
@@ -587,56 +629,46 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
                         'format':                'Rapport',
                     }
 
-                    # Construire les paramètres de zones
-                    zones = {
-                        k: {
-                            'pages':     zone_config[k]['pages'],
-                            'pct_left':  zone_config[k]['pct_left'],
-                            'pct_right': zone_config[k]['pct_right'],
-                        }
-                        for k in ['actif', 'passif', 'cpc']
-                    }
-
                     with st.spinner("Analyse en cours..."):
                         parsed_r = parse_rapport(
                             pdf_path_r,
-                            pages_actif=zones['actif']['pages'],
-                            pages_passif=zones['passif']['pages'],
-                            pages_cpc=zones['cpc']['pages'],
-                            zone_actif=(zones['actif']['pct_left'],   zones['actif']['pct_right']),
-                            zone_passif=(zones['passif']['pct_left'], zones['passif']['pct_right']),
-                            zone_cpc=(zones['cpc']['pct_left'],       zones['cpc']['pct_right']),
+                            pages_actif  = new_zc['actif']['pages'],
+                            pages_passif = new_zc['passif']['pages'],
+                            pages_cpc    = new_zc['cpc']['pages'],
+                            zone_actif   = (new_zc['actif']['pct_left'],   new_zc['actif']['pct_right']),
+                            zone_passif  = (new_zc['passif']['pct_left'],  new_zc['passif']['pct_right']),
+                            zone_cpc     = (new_zc['cpc']['pct_left'],     new_zc['cpc']['pct_right']),
                             info=info_r,
                         )
 
                     s = parsed_r['_stats']
-                    st.markdown("#### Résultat de l'analyse")
+                    st.markdown("#### Résultat")
                     ka, kp, kc = st.columns(3)
 
-                    def kpi_card(col, label, found, total):
-                        pct = round(found / total * 100)
-                        color = "#375623" if pct >= 60 else ("#7F6000" if pct >= 30 else "#7B2C00")
+                    def kpi(col, label, found, total):
+                        pct   = round(found/total*100)
+                        color = "#375623" if pct>=60 else ("#7F6000" if pct>=30 else "#7B2C00")
                         col.markdown(f"""<div class="kpi">
-    <div class="v" style="color:{color};">{found} / {total}</div>
+    <div class="v" style="color:{color};">{found}/{total}</div>
     <div class="l">{label} ({pct}%)</div></div>""", unsafe_allow_html=True)
 
-                    kpi_card(ka, "Actif",  s['actif'],  s['actif_max'])
-                    kpi_card(kp, "Passif", s['passif'], s['passif_max'])
-                    kpi_card(kc, "CPC",    s['cpc'],    s['cpc_max'])
+                    kpi(ka, "Actif",  s['actif'],  s['actif_max'])
+                    kpi(kp, "Passif", s['passif'], s['passif_max'])
+                    kpi(kc, "CPC",    s['cpc'],    s['cpc_max'])
 
                     total_pct = round(
-                        (s['actif'] + s['passif'] + s['cpc']) /
-                        (s['actif_max'] + s['passif_max'] + s['cpc_max']) * 100
+                        (s['actif']+s['passif']+s['cpc']) /
+                        (s['actif_max']+s['passif_max']+s['cpc_max']) * 100
                     )
 
                     if total_pct >= 60:
-                        st.markdown(f'<div class="ok">✅ <strong>Bonne extraction</strong> — {total_pct}% des postes détectés.</div>',
+                        st.markdown(f'<div class="ok">✅ <strong>Bonne extraction</strong> — {total_pct}%.</div>',
                                     unsafe_allow_html=True)
                     elif total_pct >= 30:
-                        st.markdown(f'<div class="warn">⚠️ <strong>Extraction partielle</strong> — {total_pct}%. Ajustez les zones et réessayez.</div>',
+                        st.markdown(f'<div class="warn">⚠️ <strong>Extraction partielle</strong> — {total_pct}%. Ajustez les zones.</div>',
                                     unsafe_allow_html=True)
                     else:
-                        st.markdown(f'<div class="er">❌ <strong>Extraction insuffisante</strong> — {total_pct}%. Vérifiez les pages et zones.</div>',
+                        st.markdown(f'<div class="er">❌ <strong>Insuffisant</strong> — {total_pct}%. Vérifiez les pages et zones.</div>',
                                     unsafe_allow_html=True)
 
                     st.session_state['parsed_rapport'] = parsed_r
@@ -645,15 +677,14 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
                     logger.exception("Erreur analyse rapport")
                     st.markdown(f'<div class="er">❌ <strong>Erreur :</strong> <code>{e}</code></div>',
                                 unsafe_allow_html=True)
-                    import traceback
-                    st.code(traceback.format_exc())
+                    import traceback; st.code(traceback.format_exc())
 
             # ── ÉTAPE 5 : Générer Excel ───────────────────────────────
             if 'parsed_rapport' in st.session_state:
                 st.markdown("---")
                 st.markdown("### 📥 Étape 5 — Générer l'Excel")
 
-                parsed_r  = st.session_state['parsed_rapport']
+                parsed_r   = st.session_state['parsed_rapport']
                 info_check = parsed_r['info']
                 errors_r   = []
                 if not info_check.get('raison_sociale'):  errors_r.append("Raison sociale")
@@ -664,19 +695,19 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
 
                 if errors_r:
                     st.markdown(
-                        f'<div class="warn">⚠️ Complétez d\'abord : <strong>{", ".join(errors_r)}</strong> (Étape 2)</div>',
+                        f'<div class="warn">⚠️ Complétez : <strong>{", ".join(errors_r)}</strong></div>',
                         unsafe_allow_html=True)
                 else:
                     if st.button("📥 Générer l'Excel", type="primary",
                                  use_container_width=True, key="btn_generer"):
                         try:
                             from core.excel_writer import write
-                            output_path_r = pdf_path_r.replace(".pdf", "_rapport_out.xlsx")
-                            with st.spinner("Génération de l'Excel..."):
+                            output_path_r = pdf_path_r.replace(".pdf", "_out.xlsx")
+                            with st.spinner("Génération..."):
                                 stats_r = write(parsed_r, output_path_r)
 
-                            raison_r = info_check.get('raison_sociale', 'RAPPORT')
-                            date_r   = info_check.get('exercice_fin', '').replace('/', '_')
+                            raison_r = info_check.get('raison_sociale','RAPPORT')
+                            date_r   = info_check.get('exercice_fin','').replace('/','_')
                             fname_r  = f"FiscalXL_{raison_r.replace(' ','_')[:20]}_{date_r}_Rapport.xlsx"
 
                             with open(output_path_r, "rb") as f_dl:
@@ -687,24 +718,18 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
                                     key="dl_rapport"
                                 )
                             st.markdown(f"""<div class="ok">
-    ✅ <strong>Excel prêt</strong> &nbsp;·&nbsp;
-    <strong>{raison_r[:30]}</strong> &nbsp;·&nbsp;
-    {info_check.get('exercice_fin','')} &nbsp;·&nbsp;
+    ✅ <strong>Excel prêt</strong> · <strong>{raison_r[:25]}</strong> ·
+    {info_check.get('exercice_fin','')} ·
     Actif {stats_r['actif']} · Passif {stats_r['passif']} · CPC {stats_r['cpc']}
     </div>""", unsafe_allow_html=True)
-
-                            try:
-                                os.unlink(output_path_r)
-                            except Exception:
-                                pass
+                            try: os.unlink(output_path_r)
+                            except Exception: pass
 
                         except Exception as e:
-                            logger.exception("Erreur génération Excel rapport")
-                            st.markdown(
-                                f'<div class="er">❌ <strong>Erreur :</strong> <code>{e}</code></div>',
-                                unsafe_allow_html=True)
-                            import traceback
-                            st.code(traceback.format_exc())
+                            logger.exception("Erreur génération Excel")
+                            st.markdown(f'<div class="er">❌ <code>{e}</code></div>',
+                                        unsafe_allow_html=True)
+                            import traceback; st.code(traceback.format_exc())
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ONGLET 2 — GUIDE D'UTILISATION
+# ONGLET 2
