@@ -312,360 +312,399 @@ border:2px dashed #BDD7EE;border-radius:12px;background:#f8fafd;">
     # ══════════════════════════════════════════════════════════════
     # MODE RAPPORT FINANCIER
     # ══════════════════════════════════════════════════════════════
+    """
+    Mode Rapport Financier — à intégrer dans app.py (bloc `else` du mode rapport)
+    Remplace le bloc `else: # MODE RAPPORT FINANCIER` existant.
+    """
+
+    # ══════════════════════════════════════════════════════════════════
+    # MODE RAPPORT FINANCIER
+    # ══════════════════════════════════════════════════════════════════
+
+    st.markdown("""<div class="rapport-box">
+    <span class="step-badge-rapport">Rapport financier</span>
+    <h3>Conversion d'un rapport financier libre</h3>
+    <p>
+    Uploadez votre rapport, indiquez les pages et les zones visuellement,
+    puis générez l'Excel MCN standardisé.
+    </p>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── ÉTAPE 1 : Upload ─────────────────────────────────────────────
+    st.markdown("### 📂 Étape 1 — Importer le rapport PDF")
+    uploaded_r = st.file_uploader(
+        "Rapport financier annuel (PDF)",
+        type=["pdf"],
+        key="upload_rapport"
+    )
+
+    if not uploaded_r:
+        st.markdown("""<div style="text-align:center;padding:2.5rem;color:#888;
+    border:2px dashed #70AD47;border-radius:12px;background:#f0f7f0;">
+    <div style="font-size:3rem;">📑</div>
+    <h3 style="color:#375623;">Glissez votre rapport PDF ici</h3>
+    <p>Rapport financier annuel · Pages libres</p>
+    </div>""", unsafe_allow_html=True)
+
     else:
-        st.markdown("""<div class="rapport-box">
-<span class="step-badge-rapport">Rapport financier</span>
-<h3>Conversion d'un rapport financier libre</h3>
-<p>
-Ce mode vous permet de traiter des rapports financiers annuels dont la mise en page est libre
-(rapports LabelVie, ONCF, etc.). Vous indiquez manuellement les informations d'identification
-et les pages contenant le Bilan Actif, le Bilan Passif et le CPC.
-</p>
-</div>""", unsafe_allow_html=True)
+        # Sauvegarder le PDF en session
+        if 'pdf_bytes_r' not in st.session_state or st.session_state.get('pdf_name_r') != uploaded_r.name:
+            st.session_state['pdf_bytes_r'] = uploaded_r.getbuffer().tobytes()
+            st.session_state['pdf_name_r']  = uploaded_r.name
+            # Reset parsing si nouveau fichier
+            for k in ['parsed_rapport', 'pdf_path_r']:
+                st.session_state.pop(k, None)
 
-        st.markdown("---")
+        import tempfile, os, io
+        import pdfplumber
+        from PIL import Image
 
-        # ── ÉTAPE 1 : Upload ─────────────────────────────────────
-        st.markdown("### 📂 Étape 1 — Importer le rapport PDF")
-        uploaded_r = st.file_uploader(
-            "Rapport financier annuel (PDF)",
-            type=["pdf"],
-            help="Rapport financier complet — toutes les pages",
-            key="upload_rapport"
-        )
+        # Écrire le PDF dans un fichier temp permanent (pour pdfplumber)
+        if 'pdf_path_r' not in st.session_state:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+            tmp.write(st.session_state['pdf_bytes_r'])
+            tmp.close()
+            st.session_state['pdf_path_r'] = tmp.name
 
-        if not uploaded_r:
-            st.markdown("""<div style="text-align:center;padding:2.5rem;color:#888;
-border:2px dashed #70AD47;border-radius:12px;background:#f0f7f0;">
-<div style="font-size:3rem;">📑</div>
-<h3 style="color:#375623;">Glissez votre rapport PDF ici</h3>
-<p>Rapport financier annuel · Pages libres</p>
-<p style="font-size:.82rem;color:#aaa;">Le fichier est traité localement et non conservé</p>
-</div>""", unsafe_allow_html=True)
+        pdf_path_r = st.session_state['pdf_path_r']
 
-        else:
-            # Sauvegarder le PDF
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_r:
-                tmp_r.write(uploaded_r.getbuffer())
-                pdf_path_r = tmp_r.name
+        try:
+            with pdfplumber.open(pdf_path_r) as _pdf:
+                total_pages = len(_pdf.pages)
+                page_dims   = [(p.width, p.height) for p in _pdf.pages]
+            st.success(f"✅ PDF chargé — **{total_pages} page{'s' if total_pages > 1 else ''}** détectée{'s' if total_pages > 1 else ''}")
+        except Exception as e:
+            st.error(f"Erreur lecture PDF : {e}")
+            total_pages = 0
 
-            # Compter les pages
-            try:
-                import pdfplumber
-                with pdfplumber.open(pdf_path_r) as _pdf:
-                    total_pages = len(_pdf.pages)
-                st.success(f"✅ PDF chargé — **{total_pages} pages** détectées")
-            except Exception as e:
-                st.error(f"Erreur lecture PDF : {e}")
-                total_pages = 0
+        if total_pages > 0:
+            st.markdown("---")
 
-            if total_pages > 0:
-                st.markdown("---")
+            # ── ÉTAPE 2 : Identification ──────────────────────────────
+            st.markdown("### ✏️ Étape 2 — Informations d'identification")
 
-                # ── ÉTAPE 2 : Identification manuelle ────────────
-                st.markdown("### ✏️ Étape 2 — Informations d'identification")
-                st.caption("Ces informations apparaîtront dans la feuille '1 - Identification' de l'Excel.")
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                r_raison  = st.text_input("Raison sociale *", placeholder="Ex : LABELVIE SA", key="r_raison")
+                r_if      = st.text_input("Identifiant fiscal", placeholder="Ex : 4510887", key="r_if")
+                r_taxe    = st.text_input("Taxe professionnelle", placeholder="Ex : 25725940", key="r_taxe")
+            with col_r2:
+                r_date    = st.text_input("Date de bilan *", placeholder="Ex : 31/12/2025", key="r_date")
+                r_centre  = st.text_input("Centre d'affaires *", placeholder="Ex : Casa Finance", key="r_centre")
+                r_secteur = st.selectbox("Macro-secteur *",
+                    options=["— Sélectionner —","Manufactures","Services","Commerce","BTP","Holding"],
+                    key="r_secteur")
 
-                col_r1, col_r2 = st.columns(2)
-                with col_r1:
-                    r_raison  = st.text_input("Raison sociale *",
-                        placeholder="Ex : LABELVIE SA", key="r_raison")
-                    r_if      = st.text_input("Identifiant fiscal",
-                        placeholder="Ex : 4510887", key="r_if")
-                    r_taxe    = st.text_input("Taxe professionnelle",
-                        placeholder="Ex : 25725940", key="r_taxe")
-                with col_r2:
-                    r_date    = st.text_input("Date de bilan *",
-                        placeholder="Ex : 31/12/2025", key="r_date")
-                    r_centre  = st.text_input("Centre d'affaires *",
-                        placeholder="Ex : Casa Finance", key="r_centre")
-                    r_secteur = st.selectbox("Macro-secteur *",
-                        options=["— Sélectionner —", "Manufactures", "Services",
-                                 "Commerce", "BTP", "Holding"],
-                        key="r_secteur")
+            st.markdown("---")
 
-                st.markdown("---")
+            # ── ÉTAPE 3 : Pages + Zones visuelles ────────────────────
+            st.markdown("### 🗺️ Étape 3 — Localiser les tableaux")
+            st.caption(
+                "Pour chaque section, indiquez la page et la zone horizontale "
+                "en glissant les curseurs. **0% = bord gauche · 100% = bord droit.** "
+                "Si le tableau occupe toute la largeur, laissez 0%→100%."
+            )
 
-                # ── ÉTAPE 3 : Sélection des pages ────────────────
-                st.markdown("### 📄 Étape 3 — Indiquer les pages")
-                st.caption(
-                    f"Le rapport contient **{total_pages} pages**. "
-                    "Indiquez les numéros de pages (commence à 1). "
-                    "Exemples : `1` · `1,2` · `2-4`"
+            # Sélecteur de page pour l'aperçu
+            col_prev, col_info = st.columns([2, 1])
+            with col_prev:
+                preview_page = st.selectbox(
+                    "📄 Aperçu de la page",
+                    options=list(range(1, total_pages + 1)),
+                    format_func=lambda x: f"Page {x}",
+                    key="preview_page"
                 )
+            with col_info:
+                w, h = page_dims[preview_page - 1]
+                st.markdown(f"""<div style="background:#f0f7f0;border-radius:8px;
+    padding:.8rem;margin-top:1.6rem;font-size:.85rem;color:#375623;">
+    📐 <strong>{w:.0f} × {h:.0f} pt</strong><br>
+    🔢 Page {preview_page} / {total_pages}
+    </div>""", unsafe_allow_html=True)
 
-                col_p1, col_p2, col_p3 = st.columns(3)
-                with col_p1:
-                    st.markdown("**📊 Bilan Actif**")
-                    p_actif  = st.text_input("Pages Actif",
-                        placeholder="Ex : 1", key="p_actif")
-                    st.caption("4 colonnes : Brut / Amort / Net N / Net N-1")
-                with col_p2:
-                    st.markdown("**📊 Bilan Passif**")
-                    p_passif = st.text_input("Pages Passif",
-                        placeholder="Ex : 1", key="p_passif")
-                    st.caption("2 colonnes : Exercice N / Exercice N-1")
-                with col_p3:
-                    st.markdown("**📊 CPC**")
-                    p_cpc    = st.text_input("Pages CPC",
-                        placeholder="Ex : 2,3", key="p_cpc")
-                    st.caption("4 colonnes : Propres / Préc / Total N / Total N-1")
+            # Génération aperçu
+            @st.cache_data(show_spinner=False)
+            def get_page_preview(pdf_path: str, page_idx: int, resolution: int = 80) -> bytes:
+                with pdfplumber.open(pdf_path) as pdf:
+                    img = pdf.pages[page_idx].to_image(resolution=resolution)
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    return buf.getvalue()
 
-                st.markdown("---")
+            with st.spinner("Génération de l'aperçu..."):
+                preview_bytes = get_page_preview(pdf_path_r, preview_page - 1)
 
-                # ── ÉTAPE 4 : Analyser ────────────────────────────
-                st.markdown("### 🔍 Étape 4 — Analyser")
+            # Afficher l'aperçu avec les zones colorées
+            col_img, col_zones = st.columns([1, 1])
 
-                if st.button("🔍 Analyser le rapport", type="primary",
-                             use_container_width=True, key="btn_analyser"):
+            with col_img:
+                st.image(preview_bytes, caption=f"Page {preview_page}", use_column_width=True)
 
-                    # Validation pages
-                    if not p_actif.strip() or not p_passif.strip() or not p_cpc.strip():
-                        st.markdown('<div class="er">❌ Veuillez renseigner les pages Actif, Passif et CPC.</div>',
+            with col_zones:
+                st.markdown("#### 📊 Définir les zones")
+
+                SECTIONS = [
+                    ("actif",  "🟦 Bilan Actif",  "#2E75B6"),
+                    ("passif", "🟩 Bilan Passif",  "#70AD47"),
+                    ("cpc",    "🟧 CPC",           "#ED7D31"),
+                ]
+
+                zone_config = {}
+                for key, label, color in SECTIONS:
+                    st.markdown(f"**{label}**")
+                    p_col, _ = st.columns([1, 1])
+                    with p_col:
+                        pages_val = st.text_input(
+                            f"Pages",
+                            value="1" if total_pages == 1 else "",
+                            placeholder="Ex: 1 ou 1,2",
+                            key=f"pages_{key}",
+                            label_visibility="collapsed"
+                        )
+                        st.caption(f"Pages pour {label.split()[1]}")
+
+                    zone_pct = st.slider(
+                        f"Zone horizontale",
+                        min_value=0, max_value=100,
+                        value=(0, 100),
+                        step=5,
+                        key=f"zone_{key}",
+                        label_visibility="collapsed",
+                        help=f"Glisser pour délimiter la zone du tableau {label}"
+                    )
+
+                    # Afficher la zone choisie
+                    pct_left, pct_right = zone_pct
+                    bar_html = f"""
+    <div style="background:#e0e0e0;border-radius:4px;height:12px;margin:2px 0 8px;">
+      <div style="background:{color};border-radius:4px;height:12px;
+        margin-left:{pct_left}%;width:{pct_right-pct_left}%;"></div>
+    </div>
+    <div style="font-size:.75rem;color:#666;margin-bottom:12px;">
+      Zone : {pct_left}% → {pct_right}%
+    </div>"""
+                    st.markdown(bar_html, unsafe_allow_html=True)
+
+                    zone_config[key] = {
+                        'pages': pages_val,
+                        'pct_left':  pct_left,
+                        'pct_right': pct_right,
+                    }
+
+            # Overlay visuel des 3 zones sur l'aperçu
+            st.markdown("#### 🎨 Aperçu des zones sélectionnées")
+
+            # Recréer l'image avec overlay des zones
+            @st.cache_data(show_spinner=False)
+            def get_page_preview_hd(pdf_path: str, page_idx: int) -> tuple:
+                with pdfplumber.open(pdf_path) as pdf:
+                    page = pdf.pages[page_idx]
+                    img = page.to_image(resolution=100)
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    return buf.getvalue(), page.width, page.height
+
+            img_bytes_hd, page_w, page_h = get_page_preview_hd(pdf_path_r, preview_page - 1)
+
+            # Dessiner les zones avec PIL
+            from PIL import Image, ImageDraw, ImageFont
+            img_pil = Image.open(io.BytesIO(img_bytes_hd)).convert("RGBA")
+            overlay = Image.new("RGBA", img_pil.size, (0, 0, 0, 0))
+            draw    = ImageDraw.Draw(overlay)
+
+            COLORS_RGBA = {
+                'actif':  (46,  117, 182, 60),
+                'passif': (112, 173,  71, 60),
+                'cpc':    (237, 125,  49, 60),
+            }
+            COLORS_BORDER = {
+                'actif':  (46,  117, 182, 200),
+                'passif': (112, 173,  71, 200),
+                'cpc':    (237, 125,  49, 200),
+            }
+
+            img_w, img_h = img_pil.size
+
+            for key, cfg in zone_config.items():
+                # Convertir % → pixels image
+                x0_px = int(cfg['pct_left']  / 100 * img_w)
+                x1_px = int(cfg['pct_right'] / 100 * img_w)
+                if x1_px > x0_px:
+                    draw.rectangle([x0_px, 0, x1_px, img_h],
+                                   fill=COLORS_RGBA[key])
+                    draw.rectangle([x0_px, 0, x1_px, img_h],
+                                   outline=COLORS_BORDER[key], width=3)
+                    # Label
+                    label_map = {'actif': 'ACTIF', 'passif': 'PASSIF', 'cpc': 'CPC'}
+                    draw.text((x0_px + 5, 10), label_map[key],
+                              fill=COLORS_BORDER[key])
+
+            composite = Image.alpha_composite(img_pil, overlay).convert("RGB")
+            buf_out = io.BytesIO()
+            composite.save(buf_out, format="PNG")
+
+            col_ov1, col_ov2, col_ov3 = st.columns([1, 2, 1])
+            with col_ov2:
+                st.image(buf_out.getvalue(),
+                         caption="Zones définies — Bleu=Actif · Vert=Passif · Orange=CPC",
+                         use_column_width=True)
+
+            # Légende
+            st.markdown("""
+    <div style="display:flex;gap:1.5rem;margin:.5rem 0;">
+    <span style="color:#2E75B6;font-weight:bold;">🟦 Actif</span>
+    <span style="color:#70AD47;font-weight:bold;">🟩 Passif</span>
+    <span style="color:#ED7D31;font-weight:bold;">🟧 CPC</span>
+    </div>""", unsafe_allow_html=True)
+
+            st.markdown("---")
+
+            # ── ÉTAPE 4 : Analyser ────────────────────────────────────
+            st.markdown("### 🔍 Étape 4 — Analyser")
+
+            pages_ok = all(zone_config[k]['pages'].strip() for k in ['actif','passif','cpc'])
+            if not pages_ok:
+                st.markdown('<div class="warn">⚠️ Renseignez les pages pour les 3 sections avant d\'analyser.</div>',
+                            unsafe_allow_html=True)
+
+            if st.button("🔍 Analyser le rapport", type="primary",
+                         use_container_width=True, key="btn_analyser",
+                         disabled=not pages_ok):
+                try:
+                    from core.rapport_parser import parse as parse_rapport
+
+                    info_r = {
+                        'raison_sociale':      r_raison.strip(),
+                        'identifiant_fiscal':   r_if.strip(),
+                        'taxe_professionnelle': r_taxe.strip(),
+                        'exercice_fin':          r_date.strip(),
+                        'exercice':              r_date.strip(),
+                        'adresse':               '',
+                        'centre_affaires':       r_centre.strip(),
+                        'macro_secteur':         r_secteur,
+                        'format':                'Rapport',
+                    }
+
+                    # Construire les paramètres de zones
+                    zones = {
+                        k: {
+                            'pages':     zone_config[k]['pages'],
+                            'pct_left':  zone_config[k]['pct_left'],
+                            'pct_right': zone_config[k]['pct_right'],
+                        }
+                        for k in ['actif', 'passif', 'cpc']
+                    }
+
+                    with st.spinner("Analyse en cours..."):
+                        parsed_r = parse_rapport(
+                            pdf_path_r,
+                            pages_actif=zones['actif']['pages'],
+                            pages_passif=zones['passif']['pages'],
+                            pages_cpc=zones['cpc']['pages'],
+                            zone_actif=(zones['actif']['pct_left'],   zones['actif']['pct_right']),
+                            zone_passif=(zones['passif']['pct_left'], zones['passif']['pct_right']),
+                            zone_cpc=(zones['cpc']['pct_left'],       zones['cpc']['pct_right']),
+                            info=info_r,
+                        )
+
+                    s = parsed_r['_stats']
+                    st.markdown("#### Résultat de l'analyse")
+                    ka, kp, kc = st.columns(3)
+
+                    def kpi_card(col, label, found, total):
+                        pct = round(found / total * 100)
+                        color = "#375623" if pct >= 60 else ("#7F6000" if pct >= 30 else "#7B2C00")
+                        col.markdown(f"""<div class="kpi">
+    <div class="v" style="color:{color};">{found} / {total}</div>
+    <div class="l">{label} ({pct}%)</div></div>""", unsafe_allow_html=True)
+
+                    kpi_card(ka, "Actif",  s['actif'],  s['actif_max'])
+                    kpi_card(kp, "Passif", s['passif'], s['passif_max'])
+                    kpi_card(kc, "CPC",    s['cpc'],    s['cpc_max'])
+
+                    total_pct = round(
+                        (s['actif'] + s['passif'] + s['cpc']) /
+                        (s['actif_max'] + s['passif_max'] + s['cpc_max']) * 100
+                    )
+
+                    if total_pct >= 60:
+                        st.markdown(f'<div class="ok">✅ <strong>Bonne extraction</strong> — {total_pct}% des postes détectés.</div>',
+                                    unsafe_allow_html=True)
+                    elif total_pct >= 30:
+                        st.markdown(f'<div class="warn">⚠️ <strong>Extraction partielle</strong> — {total_pct}%. Ajustez les zones et réessayez.</div>',
                                     unsafe_allow_html=True)
                     else:
+                        st.markdown(f'<div class="er">❌ <strong>Extraction insuffisante</strong> — {total_pct}%. Vérifiez les pages et zones.</div>',
+                                    unsafe_allow_html=True)
+
+                    st.session_state['parsed_rapport'] = parsed_r
+
+                except Exception as e:
+                    logger.exception("Erreur analyse rapport")
+                    st.markdown(f'<div class="er">❌ <strong>Erreur :</strong> <code>{e}</code></div>',
+                                unsafe_allow_html=True)
+                    import traceback
+                    st.code(traceback.format_exc())
+
+            # ── ÉTAPE 5 : Générer Excel ───────────────────────────────
+            if 'parsed_rapport' in st.session_state:
+                st.markdown("---")
+                st.markdown("### 📥 Étape 5 — Générer l'Excel")
+
+                parsed_r  = st.session_state['parsed_rapport']
+                info_check = parsed_r['info']
+                errors_r   = []
+                if not info_check.get('raison_sociale'):  errors_r.append("Raison sociale")
+                if not info_check.get('exercice_fin'):    errors_r.append("Date de bilan")
+                if not info_check.get('centre_affaires'): errors_r.append("Centre d'affaires")
+                if info_check.get('macro_secteur') == "— Sélectionner —":
+                    errors_r.append("Macro-secteur")
+
+                if errors_r:
+                    st.markdown(
+                        f'<div class="warn">⚠️ Complétez d\'abord : <strong>{", ".join(errors_r)}</strong> (Étape 2)</div>',
+                        unsafe_allow_html=True)
+                else:
+                    if st.button("📥 Générer l'Excel", type="primary",
+                                 use_container_width=True, key="btn_generer"):
                         try:
-                            from core.rapport_parser import parse as parse_rapport
+                            from core.excel_writer import write
+                            output_path_r = pdf_path_r.replace(".pdf", "_rapport_out.xlsx")
+                            with st.spinner("Génération de l'Excel..."):
+                                stats_r = write(parsed_r, output_path_r)
 
-                            info_r = {
-                                'raison_sociale':      r_raison.strip(),
-                                'identifiant_fiscal':   r_if.strip(),
-                                'taxe_professionnelle': r_taxe.strip(),
-                                'exercice_fin':          r_date.strip(),
-                                'exercice':              r_date.strip(),
-                                'adresse':               '',
-                                'centre_affaires':       r_centre.strip(),
-                                'macro_secteur':         r_secteur,
-                                'format':                'Rapport',
-                            }
+                            raison_r = info_check.get('raison_sociale', 'RAPPORT')
+                            date_r   = info_check.get('exercice_fin', '').replace('/', '_')
+                            fname_r  = f"FiscalXL_{raison_r.replace(' ','_')[:20]}_{date_r}_Rapport.xlsx"
 
-                            with st.spinner("Analyse en cours..."):
-                                parsed_r = parse_rapport(
-                                    pdf_path_r,
-                                    pages_actif=p_actif,
-                                    pages_passif=p_passif,
-                                    pages_cpc=p_cpc,
-                                    info=info_r,
+                            with open(output_path_r, "rb") as f_dl:
+                                st.download_button(
+                                    "📥 Télécharger l'Excel", data=f_dl,
+                                    file_name=fname_r,
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="dl_rapport"
                                 )
+                            st.markdown(f"""<div class="ok">
+    ✅ <strong>Excel prêt</strong> &nbsp;·&nbsp;
+    <strong>{raison_r[:30]}</strong> &nbsp;·&nbsp;
+    {info_check.get('exercice_fin','')} &nbsp;·&nbsp;
+    Actif {stats_r['actif']} · Passif {stats_r['passif']} · CPC {stats_r['cpc']}
+    </div>""", unsafe_allow_html=True)
 
-                            s = parsed_r['_stats']
-
-                            # KPIs résultat
-                            st.markdown("#### Résultat de l'analyse")
-                            ka, kp, kc = st.columns(3)
-                            with ka:
-                                pct_a = round(s['actif'] / s['actif_max'] * 100)
-                                color_a = "#375623" if pct_a >= 60 else ("#7F6000" if pct_a >= 30 else "#7B2C00")
-                                st.markdown(f"""<div class="kpi">
-<div class="v" style="color:{color_a};">{s['actif']} / {s['actif_max']}</div>
-<div class="l">Postes Actif ({pct_a}%)</div></div>""", unsafe_allow_html=True)
-                            with kp:
-                                pct_p = round(s['passif'] / s['passif_max'] * 100)
-                                color_p = "#375623" if pct_p >= 60 else ("#7F6000" if pct_p >= 30 else "#7B2C00")
-                                st.markdown(f"""<div class="kpi">
-<div class="v" style="color:{color_p};">{s['passif']} / {s['passif_max']}</div>
-<div class="l">Postes Passif ({pct_p}%)</div></div>""", unsafe_allow_html=True)
-                            with kc:
-                                pct_c = round(s['cpc'] / s['cpc_max'] * 100)
-                                color_c = "#375623" if pct_c >= 60 else ("#7F6000" if pct_c >= 30 else "#7B2C00")
-                                st.markdown(f"""<div class="kpi">
-<div class="v" style="color:{color_c};">{s['cpc']} / {s['cpc_max']}</div>
-<div class="l">Postes CPC ({pct_c}%)</div></div>""", unsafe_allow_html=True)
-
-                            # Message qualitatif
-                            total_pct = round((s['actif'] + s['passif'] + s['cpc'])
-                                              / (s['actif_max'] + s['passif_max'] + s['cpc_max']) * 100)
-                            if total_pct >= 60:
-                                st.markdown(f'<div class="ok">✅ <strong>Bonne extraction</strong> — {total_pct}% des postes détectés. Vous pouvez générer l\'Excel.</div>',
-                                            unsafe_allow_html=True)
-                            elif total_pct >= 30:
-                                st.markdown(f'<div class="warn">⚠️ <strong>Extraction partielle</strong> — {total_pct}% des postes détectés. Vérifiez les numéros de pages et réessayez.</div>',
-                                            unsafe_allow_html=True)
-                            else:
-                                st.markdown(f'<div class="er">❌ <strong>Extraction insuffisante</strong> — {total_pct}% seulement. Vérifiez les pages indiquées.</div>',
-                                            unsafe_allow_html=True)
-
-                            # Stocker en session pour l'étape 5
-                            st.session_state['parsed_rapport'] = parsed_r
-                            st.session_state['pdf_path_r']     = pdf_path_r
+                            try:
+                                os.unlink(output_path_r)
+                            except Exception:
+                                pass
 
                         except Exception as e:
-                            logger.exception("Erreur analyse rapport")
+                            logger.exception("Erreur génération Excel rapport")
                             st.markdown(
                                 f'<div class="er">❌ <strong>Erreur :</strong> <code>{e}</code></div>',
                                 unsafe_allow_html=True)
                             import traceback
                             st.code(traceback.format_exc())
 
-                # ── ÉTAPE 5 : Générer l'Excel ─────────────────────
-                if 'parsed_rapport' in st.session_state:
-                    st.markdown("---")
-                    st.markdown("### 📥 Étape 5 — Générer l'Excel")
-
-                    # Validation identification
-                    parsed_r = st.session_state['parsed_rapport']
-                    info_check = parsed_r['info']
-                    errors_r = []
-                    if not info_check.get('raison_sociale'):  errors_r.append("Raison sociale")
-                    if not info_check.get('exercice_fin'):    errors_r.append("Date de bilan")
-                    if not info_check.get('centre_affaires'): errors_r.append("Centre d'affaires")
-                    if info_check.get('macro_secteur') == "— Sélectionner —":
-                        errors_r.append("Macro-secteur")
-
-                    if errors_r:
-                        st.markdown(
-                            f'<div class="warn">⚠️ Complétez d\'abord : <strong>{", ".join(errors_r)}</strong> (Étape 2)</div>',
-                            unsafe_allow_html=True)
-                    else:
-                        if st.button("📥 Générer l'Excel", type="primary",
-                                     use_container_width=True, key="btn_generer"):
-                            try:
-                                from core.excel_writer import write
-
-                                output_path_r = pdf_path_r.replace(".pdf", "_rapport_out.xlsx")
-                                with st.spinner("Génération de l'Excel..."):
-                                    stats_r = write(parsed_r, output_path_r)
-
-                                raison_r = info_check.get('raison_sociale', 'RAPPORT')
-                                date_r   = info_check.get('exercice_fin', '').replace('/', '_')
-                                fname_r  = (
-                                    f"FiscalXL_{raison_r.replace(' ','_')[:20]}"
-                                    f"_{date_r}_Rapport.xlsx"
-                                )
-
-                                with open(output_path_r, "rb") as f_dl:
-                                    st.download_button(
-                                        "📥 Télécharger l'Excel",
-                                        data=f_dl,
-                                        file_name=fname_r,
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                        key="dl_rapport"
-                                    )
-                                st.markdown(f"""<div class="ok">
-✅ <strong>Excel prêt</strong> &nbsp;·&nbsp;
-<strong>{raison_r[:30]}</strong> &nbsp;·&nbsp;
-{info_check.get('exercice_fin','')} &nbsp;·&nbsp;
-Actif {stats_r['actif']} lignes · Passif {stats_r['passif']} · CPC {stats_r['cpc']}
-</div>""", unsafe_allow_html=True)
-
-                                # Nettoyage
-                                try:
-                                    if os.path.exists(output_path_r):
-                                        os.unlink(output_path_r)
-                                except Exception:
-                                    pass
-
-                            except Exception as e:
-                                logger.exception("Erreur génération Excel rapport")
-                                st.markdown(
-                                    f'<div class="er">❌ <strong>Erreur :</strong> <code>{e}</code></div>',
-                                    unsafe_allow_html=True)
-                                import traceback
-                                st.code(traceback.format_exc())
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # ONGLET 2 — GUIDE D'UTILISATION
-# ══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.markdown("## 📖 Guide d'utilisation")
-    st.markdown("Ce guide explique comment utiliser FiscalXL Pro.")
-    st.markdown("---")
-
-    st.markdown("### Étape 1 — Choisir le format du PDF")
-    st.markdown("""
-Dans la **barre latérale gauche**, sélectionnez le format de votre PDF :
-
-| Format | Pages | Utilisation |
-|--------|-------|-------------|
-| **AMMC** | 5 pages | Bilans déposés auprès de l'AMMC |
-| **DGI** | 7 pages | États de synthèse DGI |
-| **Rapport financier** | Pages libres | Rapports annuels (LabelVie, ONCF...) |
-""")
-    st.markdown("---")
-
-    st.markdown("### Étape 2 — Mode Rapport financier")
-    st.markdown("""
-Pour le mode **Rapport financier** :
-1. Uploadez le PDF du rapport
-2. Renseignez **manuellement** les informations d'identification
-3. Indiquez les **numéros de pages** contenant Actif, Passif, CPC
-4. Cliquez sur **Analyser** pour vérifier l'extraction
-5. Si le résultat est satisfaisant (≥ 60%), générez l'Excel
-""")
-    st.info("💡 Si l'extraction est insuffisante, vérifiez que les pages indiquées correspondent bien aux tableaux financiers et réessayez.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ONGLET 3 — DOCUMENTATION TECHNIQUE
-# ══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.markdown("## 🔧 Documentation technique")
-    st.markdown("Documentation à destination de l'équipe Gestion des Risques.")
-    st.markdown("---")
-
-    st.markdown("### Architecture du projet")
-    st.code("""
-FiscalXL_Pro/
-├── app.py                  ← Interface Streamlit
-├── core/
-│   ├── ammc_parser.py      ← Parser PDF format AMMC (5 pages)
-│   ├── dgi_parser.py       ← Parser PDF format DGI (7 pages)
-│   ├── rapport_parser.py   ← Parser rapports financiers libres (NOUVEAU)
-│   ├── excel_writer.py     ← Génération Excel (commun tous formats)
-│   └── synonyms.py         ← Dictionnaire des variantes de labels
-├── utils/
-│   └── logger.py           ← Journalisation
-└── requirements.txt
-    """, language="")
-
-    st.markdown("---")
-
-    st.markdown("### Formats PDF supportés")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown('<div class="doc-section"><h4>📄 AMMC</h4>', unsafe_allow_html=True)
-        st.markdown("5 pages fixes · Template MCN · `ammc_parser.py`")
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col2:
-        st.markdown('<div class="doc-section"><h4>🏛️ DGI</h4>', unsafe_allow_html=True)
-        st.markdown("7 pages fixes · Template MCN · `dgi_parser.py`")
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="doc-section"><h4>📑 Rapport</h4>', unsafe_allow_html=True)
-        st.markdown("Pages libres · Pages indiquées manuellement · `rapport_parser.py`")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    st.markdown("### Pipeline de traitement")
-    st.markdown("""
-```
-PDF fiscal
-    ↓
-pdfplumber.extract_tables()        ← Extraction brute des tableaux
-    ↓
-_detect_val_cols()                 ← Détection automatique des colonnes numériques
-    ↓
-match_label() + synonyms.py        ← Matching des labels vers le template MCN
-    ↓
-_build_value_map()                 ← Mapping {template_idx: [v1, v2, v3, v4]}
-    ↓
-excel_writer.write()               ← Génération Excel 4 feuilles
-    ↓
-Excel structuré MCN
-```
-""")
-
-    st.markdown("---")
-
-    st.markdown("### Cas limites")
-    st.markdown("""
-| Situation | Comportement |
-|-----------|-------------|
-| PDF avec cellules fusionnées | Extraction X/Y automatique |
-| Label non reconnu | Ignoré |
-| Valeur manquante | Affiché comme `0` |
-| CPC 6 colonnes DGI (Nature\|Label\|...) | Détection automatique `_is_cpc_6col()` |
-| Extraction < 30% | Avertissement rouge — vérifier les pages |
-""")
